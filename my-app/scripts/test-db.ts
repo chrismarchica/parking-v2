@@ -5,6 +5,12 @@
  * Run with: npx tsx scripts/test-db.ts
  */
 
+import { config } from 'dotenv';
+import { resolve } from 'path';
+
+// Load .env.local file
+config({ path: resolve(__dirname, '../.env.local') });
+
 import { query } from '../lib/db';
 
 async function testConnection() {
