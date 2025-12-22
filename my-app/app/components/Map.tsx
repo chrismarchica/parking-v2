@@ -27,11 +27,9 @@ export default function Map() {
 
     map.current = new mapboxgl.Map({
       container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/dark-v11',
+      style: 'mapbox://styles/mapbox/streets-v12',
       center: NYC_CENTER,
       zoom: DEFAULT_ZOOM,
-      pitch: 45,
-      bearing: -17.6,
     });
 
     map.current.addControl(
@@ -41,22 +39,7 @@ export default function Map() {
 
     map.current.on('load', () => {
       setIsLoaded(true);
-      
-      // Add 3D buildings layer for visual appeal
-      map.current?.addLayer({
-        id: '3d-buildings',
-        source: 'composite',
-        'source-layer': 'building',
-        filter: ['==', 'extrude', 'true'],
-        type: 'fill-extrusion',
-        minzoom: 14,
-        paint: {
-          'fill-extrusion-color': '#1a1a2e',
-          'fill-extrusion-height': ['get', 'height'],
-          'fill-extrusion-base': ['get', 'min_height'],
-          'fill-extrusion-opacity': 0.8,
-        },
-      });
+      console.log('Map loaded successfully');
     });
 
     return () => {
@@ -84,9 +67,9 @@ export default function Map() {
 
   return (
     <>
-      <div ref={mapContainer} className="absolute inset-0" />
+      <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
       {!isLoaded && (
-        <div className="absolute inset-0 flex items-center justify-center bg-slate-900">
+        <div className="absolute inset-0 flex items-center justify-center bg-slate-900 z-50">
           <div className="flex flex-col items-center gap-3">
             <div className="w-8 h-8 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
             <span className="text-slate-400 text-sm">Loading map...</span>
