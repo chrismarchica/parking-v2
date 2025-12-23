@@ -46,3 +46,10 @@ CREATE INDEX parking_ticket_updated_at_idx
 CREATE INDEX parking_ticket_geom_idx
   ON parking_ticket USING GIST (geom);
 
+-- Cursor table for incremental ingestion
+CREATE TABLE ingest_cursor (
+  dataset_id          text PRIMARY KEY,
+  last_soda_updated   timestamptz NOT NULL DEFAULT '1970-01-01T00:00:00Z',
+  updated_at          timestamptz NOT NULL DEFAULT now()
+);
+
