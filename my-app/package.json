@@ -7,7 +7,12 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:db": "tsx scripts/test-db.ts"
+    "test:db": "tsx scripts/test-db.ts",
+    "ingest": "tsx ingest/run.ts",
+    "ingest:backfill": "tsx ingest/run.ts backfill",
+    "ingest:sync": "tsx ingest/run.ts sync",
+    "ingest:stats": "tsx ingest/run.ts stats",
+    "predict": "tsx scripts/predict-precinct.ts"
   },
   "dependencies": {
     "@types/pg": "^8.16.0",
