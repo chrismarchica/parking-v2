@@ -12,7 +12,8 @@
     "ingest:backfill": "tsx ingest/run.ts backfill",
     "ingest:sync": "tsx ingest/run.ts sync",
     "ingest:stats": "tsx ingest/run.ts stats",
-    "predict": "tsx scripts/predict-precinct.ts"
+    "predict": "tsx scripts/predict-precinct.ts",
+    "scheduler": "tsx scripts/scheduler.ts"
   },
   "dependencies": {
     "@types/pg": "^8.16.0",
