@@ -3,8 +3,8 @@
  * CLI entry point for parking ticket ingestion
  *
  * Usage:
- *   npx tsx ingest/run.ts backfill           - Backfill FY2022-2024 from Open Violations
- *   npx tsx ingest/run.ts backfill --quick   - Quick backfill (100K rows for testing)
+ *   npx tsx ingest/run.ts backfill           - Backfill ALL datasets (FY2022-2024)
+ *   npx tsx ingest/run.ts backfill --quick   - Quick backfill (100K rows per dataset)
  *   npx tsx ingest/run.ts sync               - Incremental sync
  *   npx tsx ingest/run.ts stats              - Show table statistics
  */
@@ -31,9 +31,6 @@ import {
   closePool,
 } from './db';
 
-// Primary dataset: Open Parking and Camera Violations (most comprehensive)
-const PRIMARY_DATASET: DatasetId = DATASETS.OPEN_VIOLATIONS;
-
 // Fiscal year date ranges
 // NYC Fiscal Year runs July 1 - June 30
 const FISCAL_YEARS = {
@@ -42,17 +39,28 @@ const FISCAL_YEARS = {
   FY2024: { start: '2023-07-01', end: '2024-06-30' },
 };
 
-// Default backfill: FY2022 through FY2024
-const DEFAULT_BACKFILL_OPTIONS: BackfillOptions = {
-  startDate: FISCAL_YEARS.FY2022.start,  // July 1, 2021
-  endDate: FISCAL_YEARS.FY2024.end,      // June 30, 2024
+// Dataset-specific backfill configurations
+const DATASET_CONFIGS: Record<DatasetId, { name: string; options: BackfillOptions }> = {
+  // Open Parking and Camera Violations - FY2022 through FY2024
+  'nc67-uf89': {
+    name: 'Open Parking and Camera Violations',
+    options: {
+      startDate: FISCAL_YEARS.FY2022.start,  // July 1, 2021
+      endDate: FISCAL_YEARS.FY2024.end,      // June 30, 2024
+    },
+  },
+  // Parking Violations Issued – Fiscal Year 2024 (more detailed, has violation_code)
+  'pvqr-7yc4': {
+    name: 'Parking Violations Issued – FY2024',
+    options: {
+      startDate: FISCAL_YEARS.FY2024.start,  // July 1, 2023
+      endDate: FISCAL_YEARS.FY2024.end,      // June 30, 2024
+    },
+  },
 };
 
-// Quick backfill for testing
-const QUICK_BACKFILL_OPTIONS: BackfillOptions = {
-  ...DEFAULT_BACKFILL_OPTIONS,
-  maxRows: 100000,  // 100K rows for quick testing
-};
+// Quick backfill for testing (100K rows per dataset)
+const QUICK_MAX_ROWS = 100000;
 
 type Command = 'backfill' | 'sync' | 'stats';
 
@@ -73,15 +81,17 @@ function formatDuration(ms: number): string {
 }
 
 /**
- * Run backfill for the primary dataset with date filtering
+ * Run backfill for a single dataset with date filtering
  */
-async function runBackfill(options: BackfillOptions = DEFAULT_BACKFILL_OPTIONS): Promise<void> {
-  const datasetId = PRIMARY_DATASET;
+async function runBackfillForDataset(
+  datasetId: DatasetId,
+  options: BackfillOptions
+): Promise<{ totalRows: number; totalUpserted: number; maxUpdatedAt: string | null }> {
+  const config = DATASET_CONFIGS[datasetId];
   
   console.log('\n' + '='.repeat(60));
-  console.log('NYC Parking Ticket Backfill');
-  console.log('='.repeat(60));
-  console.log(`Dataset: ${datasetId} (Open Parking and Camera Violations)`);
+  console.log(`Dataset: ${datasetId}`);
+  console.log(`Name: ${config.name}`);
   console.log(`Date Range: ${options.startDate} to ${options.endDate}`);
   if (options.maxRows) {
     console.log(`Max Rows: ${options.maxRows.toLocaleString()}`);
@@ -150,25 +160,70 @@ async function runBackfill(options: BackfillOptions = DEFAULT_BACKFILL_OPTIONS):
 
   const totalTime = formatDuration(Date.now() - startTime);
   
-  console.log('\n' + '='.repeat(60));
-  console.log('Backfill Complete!');
-  console.log('='.repeat(60));
-  console.log(`Total rows fetched: ${totalRows.toLocaleString()}`);
-  console.log(`Total rows upserted: ${totalUpserted.toLocaleString()}`);
-  console.log(`Total time: ${totalTime}`);
+  console.log('\n' + '-'.repeat(40));
+  console.log(`Dataset ${datasetId} complete!`);
+  console.log(`Rows fetched: ${totalRows.toLocaleString()}`);
+  console.log(`Rows upserted: ${totalUpserted.toLocaleString()}`);
+  console.log(`Time: ${totalTime}`);
   if (maxUpdatedAt) {
-    console.log(`Cursor updated to: ${maxUpdatedAt}`);
+    console.log(`Cursor: ${maxUpdatedAt}`);
   }
+  console.log('-'.repeat(40));
+
+  return { totalRows, totalUpserted, maxUpdatedAt };
+}
+
+/**
+ * Run backfill for all datasets
+ */
+async function runBackfill(isQuick: boolean = false): Promise<void> {
+  const allDatasetIds = Object.values(DATASETS) as DatasetId[];
+  
+  console.log('\n' + '='.repeat(60));
+  console.log('NYC Parking Ticket Backfill - ALL DATASETS');
+  console.log('='.repeat(60));
+  console.log(`Datasets to process: ${allDatasetIds.length}`);
+  for (const id of allDatasetIds) {
+    const config = DATASET_CONFIGS[id];
+    console.log(`  - ${id}: ${config.name} (${config.options.startDate} to ${config.options.endDate})`);
+  }
+  if (isQuick) {
+    console.log(`Mode: QUICK (max ${QUICK_MAX_ROWS.toLocaleString()} rows per dataset)`);
+  }
+  console.log('='.repeat(60));
+
+  const startTime = Date.now();
+  let grandTotalRows = 0;
+  let grandTotalUpserted = 0;
+
+  for (const datasetId of allDatasetIds) {
+    const config = DATASET_CONFIGS[datasetId];
+    const options: BackfillOptions = {
+      ...config.options,
+      ...(isQuick ? { maxRows: QUICK_MAX_ROWS } : {}),
+    };
+
+    const result = await runBackfillForDataset(datasetId, options);
+    grandTotalRows += result.totalRows;
+    grandTotalUpserted += result.totalUpserted;
+  }
+
+  const totalTime = formatDuration(Date.now() - startTime);
+  
+  console.log('\n' + '='.repeat(60));
+  console.log('ALL BACKFILLS COMPLETE!');
+  console.log('='.repeat(60));
+  console.log(`Grand total rows fetched: ${grandTotalRows.toLocaleString()}`);
+  console.log(`Grand total rows upserted: ${grandTotalUpserted.toLocaleString()}`);
+  console.log(`Total time: ${totalTime}`);
   console.log('='.repeat(60) + '\n');
 }
 
 /**
- * Run incremental sync for the primary dataset
+ * Run incremental sync for a single dataset
  */
-async function runSync(): Promise<void> {
-  const datasetId = PRIMARY_DATASET;
-  
-  console.log(`\n=== Starting incremental sync for: ${datasetId} ===\n`);
+async function runSyncForDataset(datasetId: DatasetId): Promise<{ totalRows: number; totalUpserted: number }> {
+  console.log(`\n--- Syncing: ${datasetId} ---`);
 
   const cursor = await getCursor(datasetId);
   console.log(`Current cursor: ${cursor}`);
@@ -204,16 +259,39 @@ async function runSync(): Promise<void> {
 
   if (maxUpdatedAt) {
     await updateCursor(datasetId, maxUpdatedAt);
-  }
-
-  console.log(`\n=== Sync complete ===`);
-  console.log(`Total rows fetched: ${totalRows}`);
-  console.log(`Total rows upserted: ${totalUpserted}`);
-  if (maxUpdatedAt) {
     console.log(`Cursor updated to: ${maxUpdatedAt}`);
   } else {
     console.log('No new rows found');
   }
+
+  return { totalRows, totalUpserted };
+}
+
+/**
+ * Run incremental sync for all datasets
+ */
+async function runSync(): Promise<void> {
+  const allDatasetIds = Object.values(DATASETS) as DatasetId[];
+  
+  console.log('\n' + '='.repeat(60));
+  console.log('NYC Parking Ticket Sync - ALL DATASETS');
+  console.log('='.repeat(60));
+
+  let grandTotalRows = 0;
+  let grandTotalUpserted = 0;
+
+  for (const datasetId of allDatasetIds) {
+    const result = await runSyncForDataset(datasetId);
+    grandTotalRows += result.totalRows;
+    grandTotalUpserted += result.totalUpserted;
+  }
+
+  console.log('\n' + '='.repeat(60));
+  console.log('Sync Complete!');
+  console.log('='.repeat(60));
+  console.log(`Grand total rows fetched: ${grandTotalRows.toLocaleString()}`);
+  console.log(`Grand total rows upserted: ${grandTotalUpserted.toLocaleString()}`);
+  console.log('='.repeat(60) + '\n');
 }
 
 /**
@@ -248,8 +326,7 @@ async function main(): Promise<void> {
     switch (command) {
       case 'backfill': {
         const isQuick = args.includes('--quick');
-        const options = isQuick ? QUICK_BACKFILL_OPTIONS : DEFAULT_BACKFILL_OPTIONS;
-        await runBackfill(options);
+        await runBackfill(isQuick);
         break;
       }
 
@@ -284,26 +361,28 @@ Usage:
   npx tsx ingest/run.ts <command> [options]
 
 Commands:
-  backfill          - Backfill FY2022-2024 from Open Violations dataset
-  backfill --quick  - Quick backfill (100K rows for testing)
+  backfill          - Backfill ALL datasets (FY2022-2024)
+  backfill --quick  - Quick backfill (100K rows per dataset for testing)
   sync              - Incremental sync of new/updated records
   stats             - Show table statistics
 
-Dataset:
-  Uses Open Parking and Camera Violations (nc67-uf89) as primary source.
-  Backfills fiscal years 2022, 2023, and 2024 (July 2021 - June 2024).
+Datasets:
+  - nc67-uf89: Open Parking and Camera Violations (FY2022-2024)
+  - pvqr-7yc4: Parking Violations Issued – FY2024 (more detailed)
+
+All datasets have filters to exclude bus lane, speed camera, and red light camera violations.
 
 Estimated Times:
-  --quick:  ~15-20 minutes (100K rows)
-  Full:     ~4-8 hours (several million rows)
+  --quick:  ~30-40 minutes (200K rows total)
+  Full:     ~2-4 hours (depends on data volume)
 
 Environment Variables:
   DATABASE_URL              - PostgreSQL connection string (required)
   NYC_OPEN_DATA_APP_TOKEN   - Socrata app token (recommended for speed)
 
 Examples:
-  npx tsx ingest/run.ts backfill --quick   # Quick test with 100K rows
-  npx tsx ingest/run.ts backfill           # Full FY2022-2024 backfill
+  npx tsx ingest/run.ts backfill --quick   # Quick test with 100K rows per dataset
+  npx tsx ingest/run.ts backfill           # Full backfill of ALL datasets
   npx tsx ingest/run.ts sync               # Sync new records
   npx tsx ingest/run.ts stats              # Show row counts
 `);
