@@ -82,8 +82,36 @@ export interface BackfillOptions {
   maxRows?: number;    // Stop after this many rows
 }
 
+// Violations to EXCLUDE (camera-based, not parking tickets)
+// For nc67-uf89 (Open Violations) - filter by violation description
+const EXCLUDED_VIOLATIONS_NC67 = [
+  'MOBILE BUS LANE VIOLATION',
+  'WEIGH IN MOTION VIOLATION',
+];
+
+// For pvqr-7yc4 (FY2024) - filter by violation code
+// 36 = Speed Camera, 71 = Red Light Camera
+const EXCLUDED_CODES_PVQR = ['36', '71'];
+
+/**
+ * Build violation exclusion WHERE clause based on dataset
+ */
+function getViolationExclusionClause(datasetId: DatasetId): string | null {
+  if (datasetId === 'nc67-uf89') {
+    // Exclude by violation description
+    const excluded = EXCLUDED_VIOLATIONS_NC67.map(v => `'${v}'`).join(',');
+    return `violation NOT IN (${excluded})`;
+  } else if (datasetId === 'pvqr-7yc4') {
+    // Exclude by violation code
+    const excluded = EXCLUDED_CODES_PVQR.map(v => `'${v}'`).join(',');
+    return `violation_code NOT IN (${excluded})`;
+  }
+  return null;
+}
+
 /**
  * Build Socrata API URL for backfill with optional date filtering
+ * Automatically excludes camera-based violations (bus lane, speed, red light)
  */
 export function buildBackfillUrl(
   datasetId: DatasetId,
@@ -94,13 +122,20 @@ export function buildBackfillUrl(
   const fields = DATASET_FIELDS[datasetId];
   const selectClause = fields.join(',');
 
-  // Build WHERE clause for date filtering
+  // Build WHERE clause for date filtering and violation exclusions
   const whereConditions: string[] = [];
+  
   if (options.startDate) {
     whereConditions.push(`issue_date >= '${options.startDate}'`);
   }
   if (options.endDate) {
     whereConditions.push(`issue_date <= '${options.endDate}'`);
+  }
+  
+  // Add violation type exclusions (no bus lane, camera violations)
+  const exclusionClause = getViolationExclusionClause(datasetId);
+  if (exclusionClause) {
+    whereConditions.push(exclusionClause);
   }
 
   const params = new URLSearchParams({
@@ -119,6 +154,7 @@ export function buildBackfillUrl(
 
 /**
  * Build Socrata API URL for incremental sync (ordered by :updated_at)
+ * Automatically excludes camera-based violations
  */
 export function buildIncrementalUrl(
   datasetId: DatasetId,
@@ -129,9 +165,17 @@ export function buildIncrementalUrl(
   const fields = DATASET_FIELDS[datasetId];
   const selectClause = fields.join(',');
 
+  // Build WHERE clause with cursor and violation exclusions
+  const whereConditions: string[] = [`:updated_at > '${cursor}'`];
+  
+  const exclusionClause = getViolationExclusionClause(datasetId);
+  if (exclusionClause) {
+    whereConditions.push(exclusionClause);
+  }
+
   const params = new URLSearchParams({
     $select: selectClause,
-    $where: `:updated_at > '${cursor}'`,
+    $where: whereConditions.join(' AND '),
     $order: ':updated_at ASC',
     $limit: limit.toString(),
     $offset: offset.toString(),
@@ -159,7 +203,7 @@ export async function fetchPage(url: string): Promise<Record<string, unknown>[]>
 }
 
 /**
- * Get count of records matching the query
+ * Get count of records matching the query (excluding camera violations)
  */
 export async function getRecordCount(
   datasetId: DatasetId,
@@ -171,6 +215,12 @@ export async function getRecordCount(
   }
   if (options.endDate) {
     whereConditions.push(`issue_date <= '${options.endDate}'`);
+  }
+  
+  // Add violation type exclusions
+  const exclusionClause = getViolationExclusionClause(datasetId);
+  if (exclusionClause) {
+    whereConditions.push(exclusionClause);
   }
 
   const params = new URLSearchParams({

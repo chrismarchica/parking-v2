@@ -86,6 +86,7 @@ async function runBackfill(options: BackfillOptions = DEFAULT_BACKFILL_OPTIONS):
   if (options.maxRows) {
     console.log(`Max Rows: ${options.maxRows.toLocaleString()}`);
   }
+  console.log(`Filters: Excluding bus lane, speed camera, red light camera violations`);
   console.log('='.repeat(60));
 
   // Get estimated count
