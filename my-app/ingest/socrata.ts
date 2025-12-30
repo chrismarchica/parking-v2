@@ -76,16 +76,32 @@ async function fetchWithRetry(
   throw lastError || new Error('Request failed after retries');
 }
 
+export interface BackfillOptions {
+  startDate?: string;  // YYYY-MM-DD
+  endDate?: string;    // YYYY-MM-DD
+  maxRows?: number;    // Stop after this many rows
+}
+
 /**
- * Build Socrata API URL for backfill (ordered by :id)
+ * Build Socrata API URL for backfill with optional date filtering
  */
 export function buildBackfillUrl(
   datasetId: DatasetId,
   offset: number,
+  options: BackfillOptions = {},
   limit = PAGE_SIZE
 ): string {
   const fields = DATASET_FIELDS[datasetId];
   const selectClause = fields.join(',');
+
+  // Build WHERE clause for date filtering
+  const whereConditions: string[] = [];
+  if (options.startDate) {
+    whereConditions.push(`issue_date >= '${options.startDate}'`);
+  }
+  if (options.endDate) {
+    whereConditions.push(`issue_date <= '${options.endDate}'`);
+  }
 
   const params = new URLSearchParams({
     $select: selectClause,
@@ -93,6 +109,10 @@ export function buildBackfillUrl(
     $limit: limit.toString(),
     $offset: offset.toString(),
   });
+
+  if (whereConditions.length > 0) {
+    params.set('$where', whereConditions.join(' AND '));
+  }
 
   return `${SOCRATA_BASE_URL}/${datasetId}.json?${params.toString()}`;
 }
@@ -139,17 +159,55 @@ export async function fetchPage(url: string): Promise<Record<string, unknown>[]>
 }
 
 /**
- * Generator for paginated backfill
+ * Get count of records matching the query
+ */
+export async function getRecordCount(
+  datasetId: DatasetId,
+  options: BackfillOptions = {}
+): Promise<number> {
+  const whereConditions: string[] = [];
+  if (options.startDate) {
+    whereConditions.push(`issue_date >= '${options.startDate}'`);
+  }
+  if (options.endDate) {
+    whereConditions.push(`issue_date <= '${options.endDate}'`);
+  }
+
+  const params = new URLSearchParams({
+    $select: 'count(*)',
+  });
+
+  if (whereConditions.length > 0) {
+    params.set('$where', whereConditions.join(' AND '));
+  }
+
+  const url = `${SOCRATA_BASE_URL}/${datasetId}.json?${params.toString()}`;
+  
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (APP_TOKEN) {
+    headers['X-App-Token'] = APP_TOKEN;
+  }
+
+  const response = await fetchWithRetry(url, { headers });
+  const data = await response.json() as Array<{ count: string }>;
+  
+  return parseInt(data[0]?.count || '0', 10);
+}
+
+/**
+ * Generator for paginated backfill with date filtering
  */
 export async function* backfillPages(
-  datasetId: DatasetId
+  datasetId: DatasetId,
+  options: BackfillOptions = {}
 ): AsyncGenerator<Record<string, unknown>[], void, unknown> {
   let offset = 0;
   let hasMore = true;
+  const maxRows = options.maxRows || Infinity;
 
-  while (hasMore) {
-    const url = buildBackfillUrl(datasetId, offset);
-    console.log(`Fetching backfill page: offset=${offset}`);
+  while (hasMore && offset < maxRows) {
+    const url = buildBackfillUrl(datasetId, offset, options);
+    console.log(`Fetching backfill page: offset=${offset.toLocaleString()}`);
 
     const page = await fetchPage(url);
 
@@ -159,8 +217,12 @@ export async function* backfillPages(
       yield page;
       offset += page.length;
 
-      // Polite delay between pages
-      if (page.length === PAGE_SIZE) {
+      // Check if we've hit the max rows limit
+      if (offset >= maxRows) {
+        console.log(`Reached max rows limit: ${maxRows.toLocaleString()}`);
+        hasMore = false;
+      } else if (page.length === PAGE_SIZE) {
+        // Polite delay between pages
         await sleep(DELAY_BETWEEN_PAGES_MS);
       } else {
         hasMore = false;
@@ -168,7 +230,7 @@ export async function* backfillPages(
     }
   }
 
-  console.log(`Backfill complete: ${offset} total rows fetched`);
+  console.log(`Backfill complete: ${offset.toLocaleString()} total rows fetched`);
 }
 
 /**
@@ -204,4 +266,3 @@ export async function* incrementalPages(
 
   console.log(`Incremental sync complete: ${offset} total rows fetched`);
 }
-

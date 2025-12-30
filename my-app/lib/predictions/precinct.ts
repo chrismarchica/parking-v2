@@ -77,18 +77,25 @@ export async function predictPrecinct(
         precinct,
         issue_date,
         violation_time,
-        -- Parse hour from violation_time (format: HHMM followed by A or P)
+        -- Parse hour from violation_time
+        -- Handles formats: "0654P" (no colon) or "06:54P" (with colon)
         CASE 
-          -- Pattern: 4 digits followed by A or P
+          -- Pattern: 4 digits followed by A or P (e.g., "0654P")
           WHEN violation_time ~ '^[0-9]{4}[AP]$' THEN
             CASE 
-              -- PM: add 12 unless it's 12xx
               WHEN RIGHT(violation_time, 1) = 'P' AND LEFT(violation_time, 2) != '12' 
                 THEN (LEFT(violation_time, 2)::int + 12)
-              -- AM: 12xx becomes 0xx
               WHEN RIGHT(violation_time, 1) = 'A' AND LEFT(violation_time, 2) = '12'
                 THEN 0
-              -- Otherwise just the hour
+              ELSE LEFT(violation_time, 2)::int
+            END
+          -- Pattern: HH:MM followed by A or P (e.g., "06:54P")
+          WHEN violation_time ~ '^[0-9]{2}:[0-9]{2}[AP]$' THEN
+            CASE 
+              WHEN RIGHT(violation_time, 1) = 'P' AND LEFT(violation_time, 2) != '12' 
+                THEN (LEFT(violation_time, 2)::int + 12)
+              WHEN RIGHT(violation_time, 1) = 'A' AND LEFT(violation_time, 2) = '12'
+                THEN 0
               ELSE LEFT(violation_time, 2)::int
             END
           ELSE NULL
