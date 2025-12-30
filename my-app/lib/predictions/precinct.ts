@@ -106,6 +106,13 @@ export async function predictPrecinct(
         AND issue_date <= $2::date
         AND precinct IS NOT NULL
         AND precinct != ''
+        -- Exclude camera-based violations (not traditional parking tickets)
+        AND (violation_desc IS NULL OR violation_desc NOT IN (
+          'MOBILE BUS LANE VIOLATION',
+          'WEIGH IN MOTION VIOLATION'
+        ))
+        -- Also exclude by violation code if present (camera violations)
+        AND (violation_code IS NULL OR violation_code NOT IN ('36', '71'))
     ),
     filtered_tickets AS (
       -- Filter to target dow and hour
