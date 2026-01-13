@@ -13,7 +13,10 @@
     "ingest:quick": "tsx ingest/run.ts backfill --quick",
     "ingest:sync": "tsx ingest/run.ts sync",
     "ingest:stats": "tsx ingest/run.ts stats",
-    "scheduler": "tsx scripts/scheduler.ts"
+    "scheduler": "tsx scripts/scheduler.ts",
+    "geocode": "tsx scripts/geocode.ts",
+    "geocode:stats": "tsx scripts/geocode.ts --stats",
+    "geocode:test": "tsx scripts/geocode.ts --limit=1000"
   },
   "dependencies": {
     "@types/pg": "^8.16.0",
