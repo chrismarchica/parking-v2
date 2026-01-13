@@ -28,19 +28,21 @@ config({ path: resolve(__dirname, '../.env.local') });
 const NYC_GEOCLIENT_KEY = process.env.NYC_GEOCLIENT_KEY; // Primary or Secondary key from API portal
 const DATABASE_URL = process.env.DATABASE_URL;
 
-// NYC GeoClient API
-const GEOCLIENT_BASE_URL = 'https://api.nyc.gov/geo/geoclient/v1';
+// NYC GeoClient API (v2)
+const GEOCLIENT_BASE_URL = 'https://api.nyc.gov/geoclient/v2';
 
-// Rate limiting: Be respectful to the API
-const REQUESTS_PER_SECOND = 20; // NYC API can handle more, but be conservative
+// Rate limiting: Your subscription allows 100/sec, 2500/min
+// But we need to be conservative to avoid 429 errors
+const REQUESTS_PER_SECOND = 10;
 const DELAY_BETWEEN_REQUESTS_MS = Math.ceil(1000 / REQUESTS_PER_SECOND);
 
 // Batch processing
 const FETCH_BATCH_SIZE = 500; // Records to fetch at a time
 const UPDATE_BATCH_SIZE = 100; // Records to update at a time
 
-// Concurrent requests for speed
-const CONCURRENT_REQUESTS = 10;
+// Concurrent requests - keep low to avoid rate limits
+// Each record can make 2+ API calls, so effective rate is higher
+const CONCURRENT_REQUESTS = 3;
 
 // County code to borough name mapping (for GeoClient API)
 const COUNTY_TO_BOROUGH: Record<string, string> = {
@@ -136,6 +138,10 @@ function getBoroughFromCounty(county: string | null): string | null {
 /**
  * Make authenticated request to NYC GeoClient API
  */
+// Track if we've logged an error sample (to avoid spamming console)
+let errorLogCount = 0;
+const MAX_ERROR_LOGS = 5;
+
 async function geoclientFetch(endpoint: string, params: Record<string, string>): Promise<unknown | null> {
   const searchParams = new URLSearchParams(params);
   const url = `${GEOCLIENT_BASE_URL}/${endpoint}.json?${searchParams}`;
@@ -143,20 +149,34 @@ async function geoclientFetch(endpoint: string, params: Record<string, string>):
   try {
     const response = await fetch(url, {
       headers: {
-        'Ocp-Apim-Subscription-Key': NYC_GEOCLIENT_KEY!,
+        'ocp-apim-subscription-key': NYC_GEOCLIENT_KEY!,
       },
     });
     
     if (!response.ok) {
       if (response.status === 429) {
-        console.warn('Rate limited, waiting...');
-        await sleep(2000);
+        // Rate limited - wait longer and don't spam logs
+        await sleep(5000);
+        return null;
+      }
+      if (errorLogCount < MAX_ERROR_LOGS) {
+        const text = await response.text();
+        console.error(`\n❌ API Error (${response.status}): ${text.slice(0, 500)}`);
+        console.error(`   URL: ${url}`);
+        errorLogCount++;
       }
       return null;
     }
 
-    return await response.json();
-  } catch {
+    const data = await response.json();
+    // Messages from API are usually informational, not errors
+    // We check for valid lat/lon regardless of messages
+    return data;
+  } catch (err) {
+    if (errorLogCount < MAX_ERROR_LOGS) {
+      console.error(`\n❌ Fetch error: ${err}`);
+      errorLogCount++;
+    }
     return null;
   }
 }
@@ -173,22 +193,21 @@ async function geocodeIntersection(
     crossStreetOne: street1,
     crossStreetTwo: street2,
     borough: borough,
-  }) as { intersection?: { latitude?: string; longitude?: string; message?: string } } | null;
+  }) as { intersection?: { latitude?: number; longitude?: number; message?: string } } | null;
 
   if (!data) return null;
   
   const result = data.intersection;
-  if (!result || result.message) {
-    return null;
-  }
+  if (!result) return null;
 
+  // Check for valid coordinates (API may return message AND valid coords)
   const lat = result.latitude;
   const lon = result.longitude;
 
-  if (lat && lon && !isNaN(parseFloat(lat)) && !isNaN(parseFloat(lon))) {
+  if (typeof lat === 'number' && typeof lon === 'number' && !isNaN(lat) && !isNaN(lon)) {
     return {
-      latitude: parseFloat(lat),
-      longitude: parseFloat(lon),
+      latitude: lat,
+      longitude: lon,
       source: 'intersection',
     };
   }
@@ -208,22 +227,21 @@ async function geocodeAddress(
     houseNumber: houseNumber,
     street: street,
     borough: borough,
-  }) as { address?: { latitude?: string; longitude?: string; message?: string } } | null;
+  }) as { address?: { latitude?: number; longitude?: number; message?: string } } | null;
 
   if (!data) return null;
   
   const result = data.address;
-  if (!result || result.message) {
-    return null;
-  }
+  if (!result) return null;
 
+  // Check for valid coordinates (API may return message AND valid coords)
   const lat = result.latitude;
   const lon = result.longitude;
 
-  if (lat && lon && !isNaN(parseFloat(lat)) && !isNaN(parseFloat(lon))) {
+  if (typeof lat === 'number' && typeof lon === 'number' && !isNaN(lat) && !isNaN(lon)) {
     return {
-      latitude: parseFloat(lat),
-      longitude: parseFloat(lon),
+      latitude: lat,
+      longitude: lon,
       source: 'address',
     };
   }
@@ -294,7 +312,7 @@ async function geocodeRecord(
   const cleanedStreet = cleanStreetName(streetName);
   const cleanedIntersecting = intersectingStreet ? cleanStreetName(intersectingStreet) : null;
 
-  // Strategy 1: If we have an intersecting street, use intersection geocoding
+  // Strategy 1: If we have an intersecting street, use intersection geocoding (most accurate)
   if (cleanedIntersecting && cleanedIntersecting.length > 0) {
     const result = await geocodeIntersection(cleanedStreet, cleanedIntersecting, borough);
     if (result) {
@@ -313,14 +331,7 @@ async function geocodeRecord(
     }
   }
 
-  // Strategy 3: If intersecting street exists, try street stretch
-  if (cleanedIntersecting) {
-    const result = await geocodeStreetStretch(cleanedStreet, cleanedIntersecting, cleanedIntersecting, borough);
-    if (result) {
-      return result;
-    }
-  }
-
+  // No fallback - only geocode when we have accurate data (intersection or house number)
   return null;
 }
 
@@ -337,6 +348,7 @@ interface TicketToGeocode {
 
 /**
  * Get records that need geocoding
+ * Prioritizes records with intersecting_street (higher success rate)
  */
 async function getRecordsToGeocode(limit: number, offset: number = 0): Promise<TicketToGeocode[]> {
   const db = getPool();
@@ -348,7 +360,9 @@ async function getRecordsToGeocode(limit: number, offset: number = 0): Promise<T
        AND street_name IS NOT NULL
        AND street_name != ''
        AND county IS NOT NULL
-     ORDER BY issue_date DESC
+     ORDER BY 
+       (CASE WHEN intersecting_street IS NOT NULL AND intersecting_street != '' THEN 0 ELSE 1 END),
+       issue_date DESC
      LIMIT $1 OFFSET $2`,
     [limit, offset]
   );
@@ -474,8 +488,8 @@ async function processRecordsConcurrently(
       updates.length = 0;
     }
 
-    // Small delay between concurrent batches
-    await sleep(DELAY_BETWEEN_REQUESTS_MS);
+    // Delay between concurrent batches to avoid rate limits
+    await sleep(500);
     
     onProgress(succeeded, failed);
   }
