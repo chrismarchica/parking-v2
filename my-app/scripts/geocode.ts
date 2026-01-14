@@ -573,13 +573,21 @@ interface TicketToGeocode {
  * Get records that need geocoding
  * Prioritizes: 1) records with house_number (most accurate), 2) records with intersecting_street
  */
-async function getRecordsToGeocode(limit: number, offset: number = 0, requireHouseNumber: boolean = false): Promise<TicketToGeocode[]> {
+async function getRecordsToGeocode(limit: number, offset: number = 0, requireHouseNumber: boolean = false, randomSample: boolean = false): Promise<TicketToGeocode[]> {
   const db = getPool();
   
   // Build WHERE clause based on whether we require house_number
   const houseNumberCondition = requireHouseNumber 
     ? "AND house_number IS NOT NULL AND house_number != ''"
     : '';
+  
+  // For random sampling, use TABLESAMPLE or random() for a representative sample
+  const orderClause = randomSample 
+    ? 'ORDER BY random()'
+    : `ORDER BY 
+       (CASE WHEN house_number IS NOT NULL AND house_number != '' THEN 0 ELSE 1 END),
+       (CASE WHEN intersecting_street IS NOT NULL AND intersecting_street != '' THEN 0 ELSE 1 END),
+       issue_date DESC`;
   
   const result = await db.query<TicketToGeocode>(
     `SELECT summons_number, house_number, street_name, intersecting_street, county
@@ -589,10 +597,7 @@ async function getRecordsToGeocode(limit: number, offset: number = 0, requireHou
        AND street_name != ''
        AND county IS NOT NULL
        ${houseNumberCondition}
-     ORDER BY 
-       (CASE WHEN house_number IS NOT NULL AND house_number != '' THEN 0 ELSE 1 END),
-       (CASE WHEN intersecting_street IS NOT NULL AND intersecting_street != '' THEN 0 ELSE 1 END),
-       issue_date DESC
+     ${orderClause}
      LIMIT $1 OFFSET $2`,
     [limit, offset]
   );
@@ -749,6 +754,7 @@ interface GeocodingOptions {
   limit?: number;
   dryRun?: boolean;
   houseNumberOnly?: boolean;  // Only geocode records with house_number
+  randomSample?: boolean;     // Use random sampling for representative testing
 }
 
 /**
@@ -771,7 +777,7 @@ function formatDuration(ms: number): string {
  * Run the geocoding process
  */
 async function runGeocoding(options: GeocodingOptions = {}): Promise<void> {
-  const { limit = Infinity, dryRun = false, houseNumberOnly = false } = options;
+  const { limit = Infinity, dryRun = false, houseNumberOnly = false, randomSample = false } = options;
 
   console.log('\n' + '='.repeat(60));
   console.log('NYC Parking Ticket Geocoder (NYC GeoClient API)');
@@ -782,6 +788,10 @@ async function runGeocoding(options: GeocodingOptions = {}): Promise<void> {
   
   if (dryRun) {
     console.log('MODE: DRY RUN (no database updates)');
+  }
+  
+  if (randomSample) {
+    console.log('SAMPLING: Random records (for representative testing)');
   }
   
   if (houseNumberOnly) {
@@ -829,7 +839,7 @@ async function runGeocoding(options: GeocodingOptions = {}): Promise<void> {
   // Process in batches
   while (totalProcessed < toProcess) {
     const batchLimit = Math.min(FETCH_BATCH_SIZE, toProcess - totalProcessed);
-    const records = await getRecordsToGeocode(batchLimit, 0, houseNumberOnly);
+    const records = await getRecordsToGeocode(batchLimit, 0, houseNumberOnly, randomSample);
     
     if (records.length === 0) {
       break;
@@ -941,12 +951,13 @@ Options:
   --dry-run           Preview without updating database
   --stats             Show geocoding statistics only
   --house-number-only Only geocode records with house_number (uses /address API)
+  --random            Use random sampling (for representative testing)
 
 Examples:
   npx tsx scripts/geocode.ts --stats                      # Check current status
   npx tsx scripts/geocode.ts --limit=1000                 # Geocode 1000 records
   npx tsx scripts/geocode.ts --house-number-only          # Only records with house_number
-  npx tsx scripts/geocode.ts --house-number-only --limit=500  # Combine options
+  npx tsx scripts/geocode.ts --random --limit=500         # Test on random sample
   npx tsx scripts/geocode.ts --dry-run                    # Preview without saving
   npx tsx scripts/geocode.ts                              # Geocode all remaining records
 
@@ -993,6 +1004,7 @@ async function main(): Promise<void> {
   const showStatsOnly = args.includes('--stats');
   const dryRun = args.includes('--dry-run');
   const houseNumberOnly = args.includes('--house-number-only');
+  const randomSample = args.includes('--random');
   
   let limit = Infinity;
   const limitArg = args.find(arg => arg.startsWith('--limit='));
@@ -1013,7 +1025,7 @@ async function main(): Promise<void> {
     if (showStatsOnly) {
       await showStats();
     } else {
-      await runGeocoding({ limit, dryRun, houseNumberOnly });
+      await runGeocoding({ limit, dryRun, houseNumberOnly, randomSample });
     }
   } catch (error) {
     console.error('Fatal error:', error);

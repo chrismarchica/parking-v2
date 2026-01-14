@@ -34,6 +34,7 @@ export const DATASET_FIELDS: Record<DatasetId, string[]> = {
     'issuing_agency',
     'violation_county',
     'violation_precinct',
+    'house_number',
     'street_name',
     'intersecting_street',
     'plate_id',
@@ -67,6 +68,7 @@ export interface ParkingTicketRow {
   violation_code: string | null;
   violation_desc: string | null;
   issuing_agency: string | null;
+  house_number: string | null;
   county: string | null;
   precinct: string | null;
   street_name: string | null;
@@ -97,6 +99,11 @@ export function mapToTicketRow(
   const sodaUpdatedAt = raw[':updated_at'] as string;
 
   if (datasetId === 'pvqr-7yc4') {
+    // Normalize house_number: trim and uppercase
+    const houseNumber = (raw.house_number as string)?.trim().toUpperCase() || null;
+    // Normalize street_name: trim and uppercase
+    const streetName = (raw.street_name as string)?.trim().toUpperCase() || null;
+    
     return {
       summons_number: summonsNumber,
       source_dataset: datasetId,
@@ -105,10 +112,11 @@ export function mapToTicketRow(
       violation_code: (raw.violation_code as string) || null,
       violation_desc: null, // Not available in this dataset
       issuing_agency: (raw.issuing_agency as string) || null,
+      house_number: houseNumber,
       county: (raw.violation_county as string) || null,
       precinct: (raw.violation_precinct as string) || null,
-      street_name: (raw.street_name as string) || null,
-      intersecting_street: (raw.intersecting_street as string) || null,
+      street_name: streetName,
+      intersecting_street: (raw.intersecting_street as string)?.trim().toUpperCase() || null,
       fine_amount: null, // Not always present in this dataset
       plate_id: (raw.plate_id as string) || null,
       registration_state: (raw.registration_state as string) || null,
@@ -126,6 +134,7 @@ export function mapToTicketRow(
       violation_code: null, // Not in this dataset
       violation_desc: (raw.violation as string) || null,
       issuing_agency: (raw.issuing_agency as string) || null,
+      house_number: null, // Not in this dataset
       county: (raw.county as string) || null,
       precinct: (raw.precinct as string) || null,
       street_name: null, // Not in this dataset

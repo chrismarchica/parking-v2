@@ -14,6 +14,7 @@ CREATE TABLE parking_ticket (
   issuing_agency        text,
 
   -- Location (raw)
+  house_number          text,                    -- for address geocoding
   county                text,
   precinct              text,
   street_name           text,
