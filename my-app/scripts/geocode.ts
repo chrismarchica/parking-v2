@@ -109,10 +109,142 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Expand truncated street suffixes
+ * NYC parking data often has truncated street names (20 char limit)
+ */
+function expandStreetSuffix(street: string): string {
+  // Common truncations at end of street name (order matters - check longer patterns first)
+  const expansions: [RegExp, string][] = [
+    // Parkway variations
+    [/\bPARKWA$/i, 'PARKWAY'],
+    [/\bPKWAY$/i, 'PARKWAY'],
+    [/\bPKWY$/i, 'PARKWAY'],
+    [/\bPARKW$/i, 'PARKWAY'],
+    [/\bPARK$/i, 'PARKWAY'],  // Only if preceded by space (handled by \b)
+    [/\bPAR$/i, 'PARKWAY'],
+    [/\bPA$/i, 'PARKWAY'],
+    
+    // Avenue variations  
+    [/\bAVENU$/i, 'AVENUE'],
+    [/\bAVEN$/i, 'AVENUE'],
+    [/\bAVE$/i, 'AVENUE'],
+    [/\sA$/i, ' AVENUE'],  // Single "A" at end after space = AVENUE (e.g., "POLITE A" → "POLITE AVENUE")
+    
+    // Boulevard variations
+    [/\bBOULEVAR$/i, 'BOULEVARD'],
+    [/\bBOULEVA$/i, 'BOULEVARD'],
+    [/\bBOULEV$/i, 'BOULEVARD'],
+    [/\bBOULE$/i, 'BOULEVARD'],
+    [/\bBOUL$/i, 'BOULEVARD'],
+    [/\bBLVD$/i, 'BOULEVARD'],
+    
+    // Road variations
+    [/\bROA$/i, 'ROAD'],
+    [/\bRD$/i, 'ROAD'],
+    
+    // Street variations
+    [/\bSTREE$/i, 'STREET'],
+    [/\bSTRE$/i, 'STREET'],
+    [/\bST$/i, 'STREET'],
+    
+    // Drive variations
+    [/\bDRIV$/i, 'DRIVE'],
+    [/\bDRI$/i, 'DRIVE'],
+    [/\bDR$/i, 'DRIVE'],
+    
+    // Place variations
+    [/\bPLAC$/i, 'PLACE'],
+    [/\bPLA$/i, 'PLACE'],
+    [/\bPL$/i, 'PLACE'],
+    
+    // Lane variations
+    [/\bLAN$/i, 'LANE'],
+    [/\bLA$/i, 'LANE'],
+    [/\bLN$/i, 'LANE'],
+    
+    // Court variations
+    [/\bCOUR$/i, 'COURT'],
+    [/\bCOU$/i, 'COURT'],
+    [/\bCT$/i, 'COURT'],
+    
+    // Terrace variations
+    [/\bTERRAC$/i, 'TERRACE'],
+    [/\bTERRA$/i, 'TERRACE'],
+    [/\bTERR$/i, 'TERRACE'],
+    [/\bTER$/i, 'TERRACE'],
+    
+    // Expressway variations
+    [/\bEXPRESSWA$/i, 'EXPRESSWAY'],
+    [/\bEXPRESSW$/i, 'EXPRESSWAY'],
+    [/\bEXPRESS$/i, 'EXPRESSWAY'],
+    [/\bEXPRES$/i, 'EXPRESSWAY'],
+    [/\bEXPRE$/i, 'EXPRESSWAY'],
+    [/\bEXPR$/i, 'EXPRESSWAY'],
+    [/\bEXPY$/i, 'EXPRESSWAY'],
+    
+    // Highway variations
+    [/\bHIGHWA$/i, 'HIGHWAY'],
+    [/\bHIGHW$/i, 'HIGHWAY'],
+    [/\bHWY$/i, 'HIGHWAY'],
+    
+    // Circle variations
+    [/\bCIRCL$/i, 'CIRCLE'],
+    [/\bCIRC$/i, 'CIRCLE'],
+    [/\bCIR$/i, 'CIRCLE'],
+    
+    // Concourse variations
+    [/\bCONCOURS$/i, 'CONCOURSE'],
+    [/\bCONCOUR$/i, 'CONCOURSE'],
+    [/\bCONCOU$/i, 'CONCOURSE'],
+    [/\bCONCO$/i, 'CONCOURSE'],
+    
+    // Directional variations (often truncated in intersections)
+    [/\bSOUTHWES$/i, 'SOUTHWEST'],
+    [/\bSOUTHWE$/i, 'SOUTHWEST'],
+    [/\bSOUTHW$/i, 'SOUTHWEST'],
+    [/\bNORTHWES$/i, 'NORTHWEST'],
+    [/\bNORTHWE$/i, 'NORTHWEST'],
+    [/\bNORTHW$/i, 'NORTHWEST'],
+    [/\bSOUTHEAS$/i, 'SOUTHEAST'],
+    [/\bSOUTHEA$/i, 'SOUTHEAST'],
+    [/\bSOUTHE$/i, 'SOUTHEAST'],
+    [/\bNORTHEAS$/i, 'NORTHEAST'],
+    [/\bNORTHEA$/i, 'NORTHEAST'],
+    [/\bNORTHE$/i, 'NORTHEAST'],
+    
+    // Bridge variations
+    [/\bBRIDG$/i, 'BRIDGE'],
+    [/\bBRI$/i, 'BRIDGE'],
+    
+    // Turnpike variations
+    [/\bTURNPIK$/i, 'TURNPIKE'],
+    [/\bTURNPI$/i, 'TURNPIKE'],
+    [/\bTURNP$/i, 'TURNPIKE'],
+    [/\bTPKE$/i, 'TURNPIKE'],
+    
+    // Plaza variations
+    [/\bPLAZ$/i, 'PLAZA'],
+    
+    // Square variations
+    [/\bSQUAR$/i, 'SQUARE'],
+    [/\bSQUA$/i, 'SQUARE'],
+    [/\bSQ$/i, 'SQUARE'],
+  ];
+  
+  for (const [pattern, replacement] of expansions) {
+    if (pattern.test(street)) {
+      return street.replace(pattern, replacement);
+    }
+  }
+  
+  return street;
+}
+
+/**
  * Clean street name for geocoding
  */
 function cleanStreetName(street: string): string {
-  return street
+  let cleaned = street
     .replace(/^I\/O\s+/i, '')   // Remove "I/O" prefix (in front of)
     .replace(/^O\/S\s+/i, '')   // Remove "O/S" prefix (opposite side)
     .replace(/^N\/O\s+/i, '')   // Remove "N/O" prefix (north of)
@@ -125,6 +257,11 @@ function cleanStreetName(street: string): string {
     .replace(/^@\s*/i, '')      // Remove "@" prefix
     .replace(/\s+/g, ' ')       // Normalize whitespace
     .trim();
+  
+  // Expand truncated street suffixes
+  cleaned = expandStreetSuffix(cleaned);
+  
+  return cleaned;
 }
 
 /**
@@ -141,6 +278,60 @@ function getBoroughFromCounty(county: string | null): string | null {
 // Track if we've logged an error sample (to avoid spamming console)
 let errorLogCount = 0;
 const MAX_ERROR_LOGS = 5;
+
+// Track failure reasons for debugging
+interface FailureStats {
+  total: number;
+  reasons: Record<string, number>;
+  samples: Array<{ input: string; reason: string }>;
+}
+
+const failureStats: FailureStats = {
+  total: 0,
+  reasons: {},
+  samples: [],
+};
+
+const MAX_FAILURE_SAMPLES = 10;
+
+function trackFailure(input: string, reason: string): void {
+  failureStats.total++;
+  failureStats.reasons[reason] = (failureStats.reasons[reason] || 0) + 1;
+  
+  if (failureStats.samples.length < MAX_FAILURE_SAMPLES) {
+    failureStats.samples.push({ input, reason });
+  }
+}
+
+function printFailureStats(): void {
+  if (failureStats.total === 0) return;
+  
+  console.log('\n📊 Failure Analysis:');
+  console.log(`   Total failures: ${failureStats.total.toLocaleString()}`);
+  
+  // Sort by count descending
+  const sortedReasons = Object.entries(failureStats.reasons)
+    .sort((a, b) => b[1] - a[1]);
+  
+  console.log('   Top failure reasons:');
+  for (const [reason, count] of sortedReasons.slice(0, 10)) {
+    const pct = ((count / failureStats.total) * 100).toFixed(1);
+    console.log(`     - ${reason}: ${count.toLocaleString()} (${pct}%)`);
+  }
+  
+  if (failureStats.samples.length > 0) {
+    console.log('\n   Sample failed records:');
+    for (const sample of failureStats.samples.slice(0, 5)) {
+      console.log(`     - "${sample.input}" → ${sample.reason}`);
+    }
+  }
+}
+
+function resetFailureStats(): void {
+  failureStats.total = 0;
+  failureStats.reasons = {};
+  failureStats.samples = [];
+}
 
 async function geoclientFetch(endpoint: string, params: Record<string, string>): Promise<unknown | null> {
   const searchParams = new URLSearchParams(params);
@@ -189,16 +380,24 @@ async function geocodeIntersection(
   street2: string,
   borough: string
 ): Promise<GeocodingResult | null> {
+  const inputDesc = `${street1} & ${street2}, ${borough}`;
+  
   const data = await geoclientFetch('intersection', {
     crossStreetOne: street1,
     crossStreetTwo: street2,
     borough: borough,
-  }) as { intersection?: { latitude?: number; longitude?: number; message?: string } } | null;
+  }) as { intersection?: { latitude?: number; longitude?: number; message?: string; message2?: string } } | null;
 
-  if (!data) return null;
+  if (!data) {
+    trackFailure(inputDesc, 'API_ERROR');
+    return null;
+  }
   
   const result = data.intersection;
-  if (!result) return null;
+  if (!result) {
+    trackFailure(inputDesc, 'NO_INTERSECTION_RESULT');
+    return null;
+  }
 
   // Check for valid coordinates (API may return message AND valid coords)
   const lat = result.latitude;
@@ -212,6 +411,9 @@ async function geocodeIntersection(
     };
   }
 
+  // Track the specific failure reason from the API
+  const reason = result.message || result.message2 || 'NO_COORDINATES';
+  trackFailure(inputDesc, reason);
   return null;
 }
 
@@ -223,16 +425,24 @@ async function geocodeAddress(
   street: string,
   borough: string
 ): Promise<GeocodingResult | null> {
+  const inputDesc = `${houseNumber} ${street}, ${borough}`;
+  
   const data = await geoclientFetch('address', {
     houseNumber: houseNumber,
     street: street,
     borough: borough,
-  }) as { address?: { latitude?: number; longitude?: number; message?: string } } | null;
+  }) as { address?: { latitude?: number; longitude?: number; message?: string; message2?: string } } | null;
 
-  if (!data) return null;
+  if (!data) {
+    trackFailure(inputDesc, 'API_ERROR');
+    return null;
+  }
   
   const result = data.address;
-  if (!result) return null;
+  if (!result) {
+    trackFailure(inputDesc, 'NO_ADDRESS_RESULT');
+    return null;
+  }
 
   // Check for valid coordinates (API may return message AND valid coords)
   const lat = result.latitude;
@@ -246,6 +456,9 @@ async function geocodeAddress(
     };
   }
 
+  // Track the specific failure reason from the API
+  const reason = result.message || result.message2 || 'NO_COORDINATES';
+  trackFailure(inputDesc, reason);
   return null;
 }
 
@@ -564,6 +777,9 @@ async function runGeocoding(options: GeocodingOptions = {}): Promise<void> {
   console.log('NYC Parking Ticket Geocoder (NYC GeoClient API)');
   console.log('='.repeat(60));
   
+  // Reset failure tracking for this run
+  resetFailureStats();
+  
   if (dryRun) {
     console.log('MODE: DRY RUN (no database updates)');
   }
@@ -657,6 +873,9 @@ async function runGeocoding(options: GeocodingOptions = {}): Promise<void> {
   console.log(`Successfully geocoded: ${totalSucceeded.toLocaleString()} (${successRate}%)`);
   console.log(`Failed: ${totalFailed.toLocaleString()}`);
   console.log(`Time elapsed: ${totalTime}`);
+  
+  // Print failure analysis
+  printFailureStats();
   console.log('='.repeat(60) + '\n');
 
   // Show updated stats
