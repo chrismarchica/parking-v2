@@ -22,18 +22,6 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Bottom info panel */}
-      <div className="absolute bottom-6 left-6 z-10">
-        <div className="bg-slate-900/90 backdrop-blur-sm rounded-2xl p-5 border border-slate-700/50 max-w-sm shadow-xl">
-          <h2 className="text-lg font-semibold text-white mb-2">
-            <span className="inline-block w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span>
-            XGBoost Model Active
-          </h2>
-          <p className="text-sm text-slate-400 leading-relaxed">
-            Displaying parking ticket predictions based on historical data. The heatmap shows areas with the highest likelihood of receiving a ticket.
-          </p>
-        </div>
-      </div>
     </div>
   );
 }
