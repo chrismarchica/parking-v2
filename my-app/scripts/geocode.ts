@@ -297,9 +297,10 @@ async function geocodeStreetStretch(
 
 /**
  * Geocode a single parking ticket record
- * Tries multiple strategies: intersection first, then address parsing
+ * Tries multiple strategies: 1) address with house_number, 2) intersection, 3) parse house from street
  */
 async function geocodeRecord(
+  houseNumber: string | null,
   streetName: string,
   intersectingStreet: string | null,
   county: string | null
@@ -312,7 +313,15 @@ async function geocodeRecord(
   const cleanedStreet = cleanStreetName(streetName);
   const cleanedIntersecting = intersectingStreet ? cleanStreetName(intersectingStreet) : null;
 
-  // Strategy 1: If we have an intersecting street, use intersection geocoding (most accurate)
+  // Strategy 1: If we have a house_number, use address geocoding (most accurate)
+  if (houseNumber && houseNumber.trim()) {
+    const result = await geocodeAddress(houseNumber.trim(), cleanedStreet, borough);
+    if (result) {
+      return result;
+    }
+  }
+
+  // Strategy 2: If we have an intersecting street, use intersection geocoding
   if (cleanedIntersecting && cleanedIntersecting.length > 0) {
     const result = await geocodeIntersection(cleanedStreet, cleanedIntersecting, borough);
     if (result) {
@@ -320,18 +329,18 @@ async function geocodeRecord(
     }
   }
 
-  // Strategy 2: Try to parse house number from street name (e.g., "123 MAIN ST")
+  // Strategy 3: Try to parse house number from street name (e.g., "123 MAIN ST")
   const addressMatch = cleanedStreet.match(/^(\d+[-\d]*)\s+(.+)$/);
   if (addressMatch) {
-    const houseNumber = addressMatch[1];
+    const parsedHouseNumber = addressMatch[1];
     const streetOnly = addressMatch[2];
-    const result = await geocodeAddress(houseNumber, streetOnly, borough);
+    const result = await geocodeAddress(parsedHouseNumber, streetOnly, borough);
     if (result) {
       return result;
     }
   }
 
-  // No fallback - only geocode when we have accurate data (intersection or house number)
+  // No fallback - only geocode when we have accurate data
   return null;
 }
 
@@ -341,6 +350,7 @@ async function geocodeRecord(
 
 interface TicketToGeocode {
   summons_number: string;
+  house_number: string | null;
   street_name: string;
   intersecting_street: string | null;
   county: string | null;
@@ -348,19 +358,26 @@ interface TicketToGeocode {
 
 /**
  * Get records that need geocoding
- * Prioritizes records with intersecting_street (higher success rate)
+ * Prioritizes: 1) records with house_number (most accurate), 2) records with intersecting_street
  */
-async function getRecordsToGeocode(limit: number, offset: number = 0): Promise<TicketToGeocode[]> {
+async function getRecordsToGeocode(limit: number, offset: number = 0, requireHouseNumber: boolean = false): Promise<TicketToGeocode[]> {
   const db = getPool();
   
+  // Build WHERE clause based on whether we require house_number
+  const houseNumberCondition = requireHouseNumber 
+    ? "AND house_number IS NOT NULL AND house_number != ''"
+    : '';
+  
   const result = await db.query<TicketToGeocode>(
-    `SELECT summons_number, street_name, intersecting_street, county
+    `SELECT summons_number, house_number, street_name, intersecting_street, county
      FROM parking_ticket
      WHERE geom IS NULL
        AND street_name IS NOT NULL
        AND street_name != ''
        AND county IS NOT NULL
+       ${houseNumberCondition}
      ORDER BY 
+       (CASE WHEN house_number IS NOT NULL AND house_number != '' THEN 0 ELSE 1 END),
        (CASE WHEN intersecting_street IS NOT NULL AND intersecting_street != '' THEN 0 ELSE 1 END),
        issue_date DESC
      LIMIT $1 OFFSET $2`,
@@ -411,20 +428,26 @@ async function getGeocodingStats(): Promise<{
   hasStreetName: number;
   noStreetName: number;
   hasCounty: number;
+  hasHouseNumber: number;
+  needsGeocodingWithHouseNumber: number;
 }> {
   const db = getPool();
 
-  const [totalResult, geocodedResult, hasStreetResult, hasCountyResult] = await Promise.all([
+  const [totalResult, geocodedResult, hasStreetResult, hasCountyResult, hasHouseNumberResult, needsWithHouseResult] = await Promise.all([
     db.query('SELECT COUNT(*) as count FROM parking_ticket'),
     db.query('SELECT COUNT(*) as count FROM parking_ticket WHERE geom IS NOT NULL'),
     db.query("SELECT COUNT(*) as count FROM parking_ticket WHERE street_name IS NOT NULL AND street_name != ''"),
     db.query("SELECT COUNT(*) as count FROM parking_ticket WHERE street_name IS NOT NULL AND street_name != '' AND county IS NOT NULL"),
+    db.query("SELECT COUNT(*) as count FROM parking_ticket WHERE house_number IS NOT NULL AND house_number != ''"),
+    db.query("SELECT COUNT(*) as count FROM parking_ticket WHERE house_number IS NOT NULL AND house_number != '' AND street_name IS NOT NULL AND county IS NOT NULL AND geom IS NULL"),
   ]);
 
   const total = parseInt(totalResult.rows[0].count);
   const geocoded = parseInt(geocodedResult.rows[0].count);
   const hasStreetName = parseInt(hasStreetResult.rows[0].count);
   const hasCounty = parseInt(hasCountyResult.rows[0].count);
+  const hasHouseNumber = parseInt(hasHouseNumberResult.rows[0].count);
+  const needsGeocodingWithHouseNumber = parseInt(needsWithHouseResult.rows[0].count);
 
   return {
     total,
@@ -433,6 +456,8 @@ async function getGeocodingStats(): Promise<{
     hasStreetName,
     noStreetName: total - hasStreetName,
     hasCounty,
+    hasHouseNumber,
+    needsGeocodingWithHouseNumber,
   };
 }
 
@@ -459,6 +484,7 @@ async function processRecordsConcurrently(
     const results = await Promise.all(
       chunk.map(async (record) => {
         const result = await geocodeRecord(
+          record.house_number,
           record.street_name,
           record.intersecting_street,
           record.county
@@ -509,6 +535,7 @@ async function processRecordsConcurrently(
 interface GeocodingOptions {
   limit?: number;
   dryRun?: boolean;
+  houseNumberOnly?: boolean;  // Only geocode records with house_number
 }
 
 /**
@@ -531,7 +558,7 @@ function formatDuration(ms: number): string {
  * Run the geocoding process
  */
 async function runGeocoding(options: GeocodingOptions = {}): Promise<void> {
-  const { limit = Infinity, dryRun = false } = options;
+  const { limit = Infinity, dryRun = false, houseNumberOnly = false } = options;
 
   console.log('\n' + '='.repeat(60));
   console.log('NYC Parking Ticket Geocoder (NYC GeoClient API)');
@@ -539,6 +566,10 @@ async function runGeocoding(options: GeocodingOptions = {}): Promise<void> {
   
   if (dryRun) {
     console.log('MODE: DRY RUN (no database updates)');
+  }
+  
+  if (houseNumberOnly) {
+    console.log('FILTER: Only records with house_number');
   }
   
   if (limit !== Infinity) {
@@ -553,16 +584,21 @@ async function runGeocoding(options: GeocodingOptions = {}): Promise<void> {
   console.log('Current Status:');
   console.log(`  Total records: ${stats.total.toLocaleString()}`);
   console.log(`  Already geocoded: ${stats.geocoded.toLocaleString()}`);
+  console.log(`  With house_number: ${stats.hasHouseNumber.toLocaleString()}`);
   console.log(`  With street + county (geocodable): ${stats.hasCounty.toLocaleString()}`);
   console.log(`  Without street name: ${stats.noStreetName.toLocaleString()}`);
-  console.log(`  Needs geocoding: ${stats.needsGeocoding.toLocaleString()}`);
+  console.log(`  Needs geocoding (all): ${stats.needsGeocoding.toLocaleString()}`);
+  console.log(`  Needs geocoding (with house_number): ${stats.needsGeocodingWithHouseNumber.toLocaleString()}`);
   
-  if (stats.needsGeocoding === 0) {
+  // Determine how many to process based on mode
+  const needsProcessing = houseNumberOnly ? stats.needsGeocodingWithHouseNumber : stats.needsGeocoding;
+  
+  if (needsProcessing === 0) {
     console.log('\n✅ All geocodable records are already geocoded!');
     return;
   }
 
-  const toProcess = Math.min(limit, stats.needsGeocoding);
+  const toProcess = Math.min(limit, needsProcessing);
   const estimatedMinutes = Math.ceil(toProcess / (REQUESTS_PER_SECOND * CONCURRENT_REQUESTS) / 60);
   console.log(`\nWill process: ${toProcess.toLocaleString()} records`);
   console.log(`Estimated time: ~${estimatedMinutes} minutes`);
@@ -577,7 +613,7 @@ async function runGeocoding(options: GeocodingOptions = {}): Promise<void> {
   // Process in batches
   while (totalProcessed < toProcess) {
     const batchLimit = Math.min(FETCH_BATCH_SIZE, toProcess - totalProcessed);
-    const records = await getRecordsToGeocode(batchLimit, 0);
+    const records = await getRecordsToGeocode(batchLimit, 0, houseNumberOnly);
     
     if (records.length === 0) {
       break;
@@ -649,8 +685,11 @@ async function showStats(): Promise<void> {
   console.log(`Total records: ${stats.total.toLocaleString()}`);
   console.log(`\nGeocoding Status:`);
   console.log(`  ✓ Geocoded: ${stats.geocoded.toLocaleString()} (${geocodedPercent}% of total)`);
-  console.log(`  ○ Needs geocoding: ${stats.needsGeocoding.toLocaleString()}`);
+  console.log(`  ○ Needs geocoding (all): ${stats.needsGeocoding.toLocaleString()}`);
+  console.log(`  ○ Needs geocoding (with house_number): ${stats.needsGeocodingWithHouseNumber.toLocaleString()}`);
   console.log(`  ✗ No street name: ${stats.noStreetName.toLocaleString()}`);
+  console.log(`\nAddress Data:`);
+  console.log(`  ○ With house_number: ${stats.hasHouseNumber.toLocaleString()}`);
   console.log(`  ○ With street + county: ${stats.hasCounty.toLocaleString()}`);
   console.log(`\nOf geocodable records: ${geocodablePercent}% complete`);
 
@@ -658,7 +697,12 @@ async function showStats(): Promise<void> {
   if (stats.needsGeocoding > 0) {
     const ratePerSecond = REQUESTS_PER_SECOND * CONCURRENT_REQUESTS;
     const estimatedSeconds = stats.needsGeocoding / ratePerSecond;
-    console.log(`\nEstimated time to geocode remaining: ${formatDuration(estimatedSeconds * 1000)}`);
+    console.log(`\nEstimated time to geocode all remaining: ${formatDuration(estimatedSeconds * 1000)}`);
+    
+    if (stats.needsGeocodingWithHouseNumber > 0) {
+      const estimatedHouseSeconds = stats.needsGeocodingWithHouseNumber / ratePerSecond;
+      console.log(`Estimated time for house_number only: ${formatDuration(estimatedHouseSeconds * 1000)}`);
+    }
   }
 }
 
@@ -674,15 +718,18 @@ Usage:
   npx tsx scripts/geocode.ts [options]
 
 Options:
-  --limit=N     Limit geocoding to N records (default: all)
-  --dry-run     Preview without updating database
-  --stats       Show geocoding statistics only
+  --limit=N           Limit geocoding to N records (default: all)
+  --dry-run           Preview without updating database
+  --stats             Show geocoding statistics only
+  --house-number-only Only geocode records with house_number (uses /address API)
 
 Examples:
-  npx tsx scripts/geocode.ts --stats          # Check current status
-  npx tsx scripts/geocode.ts --limit=1000     # Geocode 1000 records
-  npx tsx scripts/geocode.ts --dry-run        # Preview without saving
-  npx tsx scripts/geocode.ts                  # Geocode all remaining records
+  npx tsx scripts/geocode.ts --stats                      # Check current status
+  npx tsx scripts/geocode.ts --limit=1000                 # Geocode 1000 records
+  npx tsx scripts/geocode.ts --house-number-only          # Only records with house_number
+  npx tsx scripts/geocode.ts --house-number-only --limit=500  # Combine options
+  npx tsx scripts/geocode.ts --dry-run                    # Preview without saving
+  npx tsx scripts/geocode.ts                              # Geocode all remaining records
 
 Environment Variables Required:
   NYC_GEOCLIENT_KEY  - Primary or Secondary key from NYC API Portal
@@ -696,7 +743,7 @@ Get your API key at: https://api-portal.nyc.gov/
 Notes:
   - Uses NYC GeoClient API (FREE, unlimited requests)
   - Processes ${CONCURRENT_REQUESTS} requests concurrently
-  - Only geocodes records with street_name AND county
+  - Prioritizes: 1) house_number + street (address API), 2) intersection
 `);
 }
 
@@ -726,6 +773,7 @@ async function main(): Promise<void> {
   const showHelp = args.includes('--help') || args.includes('-h');
   const showStatsOnly = args.includes('--stats');
   const dryRun = args.includes('--dry-run');
+  const houseNumberOnly = args.includes('--house-number-only');
   
   let limit = Infinity;
   const limitArg = args.find(arg => arg.startsWith('--limit='));
@@ -746,7 +794,7 @@ async function main(): Promise<void> {
     if (showStatsOnly) {
       await showStats();
     } else {
-      await runGeocoding({ limit, dryRun });
+      await runGeocoding({ limit, dryRun, houseNumberOnly });
     }
   } catch (error) {
     console.error('Fatal error:', error);
