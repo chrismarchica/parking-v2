@@ -14,3 +14,6 @@ postgres_data/
 .DS_Store
 Thumbs.db
 
+my-app/.next
+my-app/next-env.d.ts
+my-app/node_modules

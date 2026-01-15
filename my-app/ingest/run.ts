@@ -2,8 +2,15 @@
 /**
  * CLI entry point for parking ticket ingestion
  *
+ * Ingests parking ticket data from NYC Open Data, including addresses.
+ * FY datasets (FY2017-2024) provide house_number, street_name, and violation_code.
+ * Open Violations dataset provides fine_amount and violation description.
+ *
+ * Datasets are processed in order: FY datasets first (with addresses),
+ * then Open Violations last (uses COALESCE to preserve addresses).
+ *
  * Usage:
- *   npx tsx ingest/run.ts backfill           - Backfill ALL datasets (FY2022-2024)
+ *   npx tsx ingest/run.ts backfill           - Backfill ALL datasets (FY2017-2024 + Open Violations)
  *   npx tsx ingest/run.ts backfill --quick   - Quick backfill (100K rows per dataset)
  *   npx tsx ingest/run.ts sync               - Incremental sync
  *   npx tsx ingest/run.ts stats              - Show table statistics
@@ -34,26 +41,82 @@ import {
 // Fiscal year date ranges
 // NYC Fiscal Year runs July 1 - June 30
 const FISCAL_YEARS = {
+  FY2017: { start: '2016-07-01', end: '2017-06-30' },
+  FY2018: { start: '2017-07-01', end: '2018-06-30' },
+  FY2019: { start: '2018-07-01', end: '2019-06-30' },
+  FY2020: { start: '2019-07-01', end: '2020-06-30' },
+  FY2021: { start: '2020-07-01', end: '2021-06-30' },
   FY2022: { start: '2021-07-01', end: '2022-06-30' },
   FY2023: { start: '2022-07-01', end: '2023-06-30' },
   FY2024: { start: '2023-07-01', end: '2024-06-30' },
 };
 
 // Dataset-specific backfill configurations
+// NOTE: Order matters! FY datasets (with addresses) should be processed before
+// Open Violations (without addresses), so COALESCE preserves address data.
 const DATASET_CONFIGS: Record<DatasetId, { name: string; options: BackfillOptions }> = {
-  // Open Parking and Camera Violations - FY2022 through FY2024
-  'nc67-uf89': {
-    name: 'Open Parking and Camera Violations',
-    options: {
-      startDate: FISCAL_YEARS.FY2022.start,  // July 1, 2021
-      endDate: FISCAL_YEARS.FY2024.end,      // June 30, 2024
-    },
-  },
-  // Parking Violations Issued – Fiscal Year 2024 (more detailed, has violation_code)
+  // Parking Violations Issued – FY datasets (have house_number, street_name)
   'pvqr-7yc4': {
     name: 'Parking Violations Issued – FY2024',
     options: {
-      startDate: FISCAL_YEARS.FY2024.start,  // July 1, 2023
+      startDate: FISCAL_YEARS.FY2024.start,
+      endDate: FISCAL_YEARS.FY2024.end,
+    },
+  },
+  'pvda-ns3a': {
+    name: 'Parking Violations Issued – FY2023',
+    options: {
+      startDate: FISCAL_YEARS.FY2023.start,
+      endDate: FISCAL_YEARS.FY2023.end,
+    },
+  },
+  '869v-vr48': {
+    name: 'Parking Violations Issued – FY2022',
+    options: {
+      startDate: FISCAL_YEARS.FY2022.start,
+      endDate: FISCAL_YEARS.FY2022.end,
+    },
+  },
+  'p7t3-5i9s': {
+    name: 'Parking Violations Issued – FY2021',
+    options: {
+      startDate: FISCAL_YEARS.FY2021.start,
+      endDate: FISCAL_YEARS.FY2021.end,
+    },
+  },
+  'jt7v-77mi': {
+    name: 'Parking Violations Issued – FY2020',
+    options: {
+      startDate: FISCAL_YEARS.FY2020.start,
+      endDate: FISCAL_YEARS.FY2020.end,
+    },
+  },
+  'faiq-9dfq': {
+    name: 'Parking Violations Issued – FY2019',
+    options: {
+      startDate: FISCAL_YEARS.FY2019.start,
+      endDate: FISCAL_YEARS.FY2019.end,
+    },
+  },
+  '9wgk-ev5c': {
+    name: 'Parking Violations Issued – FY2018',
+    options: {
+      startDate: FISCAL_YEARS.FY2018.start,
+      endDate: FISCAL_YEARS.FY2018.end,
+    },
+  },
+  '2bnn-yakx': {
+    name: 'Parking Violations Issued – FY2017',
+    options: {
+      startDate: FISCAL_YEARS.FY2017.start,
+      endDate: FISCAL_YEARS.FY2017.end,
+    },
+  },
+  // Open Parking and Camera Violations - processed LAST so COALESCE preserves addresses
+  'nc67-uf89': {
+    name: 'Open Parking and Camera Violations',
+    options: {
+      startDate: FISCAL_YEARS.FY2017.start,  // July 1, 2016
       endDate: FISCAL_YEARS.FY2024.end,      // June 30, 2024
     },
   },
@@ -173,16 +236,34 @@ async function runBackfillForDataset(
   return { totalRows, totalUpserted, maxUpdatedAt };
 }
 
+// Ordered list of datasets for backfill
+// FY datasets (with addresses) are processed FIRST, Open Violations LAST
+// This ensures COALESCE preserves address data when Open Violations updates records
+const BACKFILL_ORDER: DatasetId[] = [
+  // FY datasets with addresses (newest first for most recent data)
+  'pvqr-7yc4',  // FY2024
+  'pvda-ns3a',  // FY2023
+  '869v-vr48',  // FY2022
+  'p7t3-5i9s',  // FY2021
+  'jt7v-77mi',  // FY2020
+  'faiq-9dfq',  // FY2019
+  '9wgk-ev5c',  // FY2018
+  '2bnn-yakx',  // FY2017
+  // Open Violations LAST (no addresses, but has fine_amount)
+  'nc67-uf89',
+];
+
 /**
  * Run backfill for all datasets
  */
 async function runBackfill(isQuick: boolean = false): Promise<void> {
-  const allDatasetIds = Object.values(DATASETS) as DatasetId[];
+  const allDatasetIds = BACKFILL_ORDER;
   
   console.log('\n' + '='.repeat(60));
   console.log('NYC Parking Ticket Backfill - ALL DATASETS');
   console.log('='.repeat(60));
   console.log(`Datasets to process: ${allDatasetIds.length}`);
+  console.log('Order: FY datasets (with addresses) first, Open Violations last');
   for (const id of allDatasetIds) {
     const config = DATASET_CONFIGS[id];
     console.log(`  - ${id}: ${config.name} (${config.options.startDate} to ${config.options.endDate})`);
@@ -271,7 +352,7 @@ async function runSyncForDataset(datasetId: DatasetId): Promise<{ totalRows: num
  * Run incremental sync for all datasets
  */
 async function runSync(): Promise<void> {
-  const allDatasetIds = Object.values(DATASETS) as DatasetId[];
+  const allDatasetIds = BACKFILL_ORDER;
   
   console.log('\n' + '='.repeat(60));
   console.log('NYC Parking Ticket Sync - ALL DATASETS');
@@ -361,20 +442,34 @@ Usage:
   npx tsx ingest/run.ts <command> [options]
 
 Commands:
-  backfill          - Backfill ALL datasets (FY2022-2024)
+  backfill          - Backfill ALL datasets (FY2017-2024 + Open Violations)
   backfill --quick  - Quick backfill (100K rows per dataset for testing)
   sync              - Incremental sync of new/updated records
   stats             - Show table statistics
 
-Datasets:
-  - nc67-uf89: Open Parking and Camera Violations (FY2022-2024)
-  - pvqr-7yc4: Parking Violations Issued – FY2024 (more detailed)
+Datasets (processed in order):
+  FY Datasets (with house_number, street_name):
+    - pvqr-7yc4: Parking Violations Issued – FY2024
+    - pvda-ns3a: Parking Violations Issued – FY2023
+    - 869v-vr48: Parking Violations Issued – FY2022
+    - p7t3-5i9s: Parking Violations Issued – FY2021
+    - jt7v-77mi: Parking Violations Issued – FY2020
+    - faiq-9dfq: Parking Violations Issued – FY2019
+    - 9wgk-ev5c: Parking Violations Issued – FY2018
+    - 2bnn-yakx: Parking Violations Issued – FY2017
+  
+  Open Violations (processed last, adds fine_amount):
+    - nc67-uf89: Open Parking and Camera Violations
 
-All datasets have filters to exclude bus lane, speed camera, and red light camera violations.
+FY datasets are processed first so address data (house_number, street_name)
+is populated. Open Violations is processed last and uses COALESCE to 
+preserve existing addresses while adding fine_amount data.
+
+All datasets filter out bus lane, speed camera, and red light camera violations.
 
 Estimated Times:
-  --quick:  ~30-40 minutes (200K rows total)
-  Full:     ~2-4 hours (depends on data volume)
+  --quick:  ~1-2 hours (900K rows total, 100K per dataset)
+  Full:     ~4-8 hours (depends on data volume, millions of rows)
 
 Environment Variables:
   DATABASE_URL              - PostgreSQL connection string (required)
