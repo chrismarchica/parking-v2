@@ -1,0 +1,9 @@
+Dockerfile
+.dockerignore
+.git
+.gitignore
+README.md
+my-app/node_modules
+my-app/.next
+my-app/.env*.local
+init-db

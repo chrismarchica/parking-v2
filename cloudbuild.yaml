@@ -1,0 +1,15 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--build-arg'
+      - 'NEXT_PUBLIC_MAPBOX_TOKEN=${_NEXT_PUBLIC_MAPBOX_TOKEN}'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/parking-app'
+      - '.'
+
+images:
+  - 'gcr.io/$PROJECT_ID/parking-app'
+
+substitutions:
+  _NEXT_PUBLIC_MAPBOX_TOKEN: ''
