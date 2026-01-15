@@ -18,9 +18,7 @@ import { config } from 'dotenv';
 import { resolve } from 'path';
 import { Pool } from 'pg';
 import dns from 'dns';
-
-// Force IPv4 DNS resolution (fixes WSL2/IPv6 connectivity issues with Supabase)
-dns.setDefaultResultOrder('ipv4first');
+import { promisify } from 'util';
 
 // Load environment variables
 config({ path: resolve(__dirname, '../.env.local') });
@@ -69,21 +67,61 @@ const COUNTY_TO_BOROUGH: Record<string, string> = {
 };
 
 // ============================================================================
-// Database Connection
+// Database Connection (with IPv4 resolution for WSL2/Supabase)
 // ============================================================================
 
+const dnsResolve4 = promisify(dns.resolve4);
 let pool: Pool | null = null;
 
-function getPool(): Pool {
+/**
+ * Resolve hostname to IPv4 address
+ */
+async function resolveToIPv4(hostname: string): Promise<string> {
+  try {
+    const addresses = await dnsResolve4(hostname);
+    if (addresses && addresses.length > 0) {
+      return addresses[0];
+    }
+    throw new Error('No IPv4 addresses found');
+  } catch (err) {
+    console.error(`Failed to resolve ${hostname} to IPv4:`, err);
+    throw new Error(`Cannot resolve ${hostname} to IPv4. Please use the Supabase connection pooler URL (port 6543).`);
+  }
+}
+
+/**
+ * Initialize database connection pool with IPv4 resolution
+ */
+async function initPool(): Promise<Pool> {
   if (!pool) {
     if (!DATABASE_URL) {
       throw new Error('DATABASE_URL environment variable is required');
     }
+
+    // Parse and resolve hostname to IPv4
+    const url = new URL(DATABASE_URL);
+    const originalHost = url.hostname;
+    const ipv4Address = await resolveToIPv4(originalHost);
+    
+    // Replace hostname with resolved IPv4 address
+    url.hostname = ipv4Address;
+    const ipv4ConnectionString = url.toString();
+    
+    console.log(`Connecting to database (resolved ${originalHost} -> ${ipv4Address})`);
+
     pool = new Pool({
-      connectionString: DATABASE_URL,
+      connectionString: ipv4ConnectionString,
       max: 10,
       idleTimeoutMillis: 30000,
+      ssl: { rejectUnauthorized: false },
     });
+  }
+  return pool;
+}
+
+function getPool(): Pool {
+  if (!pool) {
+    throw new Error('Database pool not initialized. Call initPool() first.');
   }
   return pool;
 }
@@ -1002,6 +1040,9 @@ async function main(): Promise<void> {
     console.error('Error: DATABASE_URL is required');
     process.exit(1);
   }
+
+  // Initialize database connection (resolves hostname to IPv4)
+  await initPool();
 
   // Parse arguments
   const showHelp = args.includes('--help') || args.includes('-h');
