@@ -11,5 +11,8 @@ steps:
 images:
   - 'gcr.io/$PROJECT_ID/parking-app'
 
+options:
+  logging: CLOUD_LOGGING_ONLY
+
 substitutions:
   _NEXT_PUBLIC_MAPBOX_TOKEN: ''
