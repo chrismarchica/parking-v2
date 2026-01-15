@@ -30,6 +30,7 @@ import {
 } from './config';
 import { backfillPages, incrementalPages, getRecordCount, type BackfillOptions } from './socrata';
 import {
+  initPool,
   getCursor,
   updateCursor,
   upsertTickets,
@@ -404,6 +405,9 @@ async function main(): Promise<void> {
   const command = args[0] as Command;
 
   try {
+    // Initialize database connection (resolves hostname to IPv4)
+    await initPool();
+    
     switch (command) {
       case 'backfill': {
         const isQuick = args.includes('--quick');

@@ -1,4 +1,8 @@
 import { Pool } from 'pg';
+import dns from 'dns';
+
+// Force IPv4 DNS resolution (fixes WSL2/IPv6 connectivity issues with Supabase)
+dns.setDefaultResultOrder('ipv4first');
 
 // Database connection pool
 let pool: Pool | null = null;

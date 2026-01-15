@@ -3,25 +3,59 @@
  */
 
 import { Pool, PoolClient } from 'pg';
+import dns from 'dns';
+import { promisify } from 'util';
 import { ParkingTicketRow, BATCH_INSERT_SIZE } from './config';
+
+// Use dns.resolve4 to explicitly get IPv4 addresses only
+const dnsResolve4 = promisify(dns.resolve4);
 
 let pool: Pool | null = null;
 
 /**
+ * Resolve hostname to IPv4 address using A record lookup
+ */
+async function resolveToIPv4(hostname: string): Promise<string> {
+  try {
+    // resolve4 explicitly gets A records (IPv4 only)
+    const addresses = await dnsResolve4(hostname);
+    if (addresses && addresses.length > 0) {
+      return addresses[0];
+    }
+    throw new Error('No IPv4 addresses found');
+  } catch (err) {
+    console.error(`Failed to resolve ${hostname} to IPv4:`, err);
+    throw new Error(`Cannot resolve ${hostname} to IPv4. Please use the Supabase connection pooler URL (port 6543) or check your network.`);
+  }
+}
+
+/**
  * Get database connection pool
  */
-export function getPool(): Pool {
+export async function initPool(): Promise<Pool> {
   if (!pool) {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) {
       throw new Error('DATABASE_URL environment variable is required');
     }
 
+    // Parse and resolve hostname to IPv4
+    const url = new URL(connectionString);
+    const originalHost = url.hostname;
+    const ipv4Address = await resolveToIPv4(originalHost);
+    
+    // Replace hostname with resolved IPv4 address
+    url.hostname = ipv4Address;
+    const ipv4ConnectionString = url.toString();
+    
+    console.log(`Connecting to database (resolved ${originalHost} -> ${ipv4Address})`);
+
     pool = new Pool({
-      connectionString,
+      connectionString: ipv4ConnectionString,
       max: 10,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
+      ssl: { rejectUnauthorized: false }, // Required when using IP address
     });
 
     pool.on('error', (err) => {
@@ -29,6 +63,16 @@ export function getPool(): Pool {
     });
   }
 
+  return pool;
+}
+
+/**
+ * Get database connection pool (sync version, must call initPool first)
+ */
+export function getPool(): Pool {
+  if (!pool) {
+    throw new Error('Database pool not initialized. Call initPool() first.');
+  }
   return pool;
 }
 
