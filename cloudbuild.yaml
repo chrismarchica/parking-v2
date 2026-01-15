@@ -8,6 +8,20 @@ steps:
       - 'gcr.io/$PROJECT_ID/parking-app'
       - '.'
 
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'parking-v2'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/parking-app'
+      - '--region'
+      - 'us-east4'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+
 images:
   - 'gcr.io/$PROJECT_ID/parking-app'
 
