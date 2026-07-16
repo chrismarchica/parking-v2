@@ -17,3 +17,5 @@ Thumbs.db
 my-app/.next
 my-app/next-env.d.ts
 my-app/node_modules
+
+.claude
