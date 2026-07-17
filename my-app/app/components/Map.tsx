@@ -3,12 +3,16 @@
 import { useRef, useEffect, useState } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
+import { VIOLATION_CODES, violationLabel } from '@/lib/violation-codes';
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
 // NYC coordinates
 const NYC_CENTER: [number, number] = [-73.985, 40.748];
 const DEFAULT_ZOOM = 11;
+
+// NYC bounding box (matches server-side validation in the predict route)
+const NYC_BOUNDS = { minLat: 40.4, maxLat: 41.0, minLon: -74.3, maxLon: -73.7 };
 
 interface MapProps {
   onPredictionLoad?: (data: null) => void;
@@ -25,12 +29,60 @@ interface HeatmapResponse {
   count: number;
 }
 
+interface PredictionItem {
+  violation_code: string;
+  probability: number;
+}
+
+interface PredictResponse {
+  predicted_violation: string;
+  confidence: number;
+  top_predictions: PredictionItem[];
+}
+
 export default function Map({ onPredictionLoad }: MapProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
+  const marker = useRef<mapboxgl.Marker | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isLoadingHeatmap, setIsLoadingHeatmap] = useState(false);
   const [heatmapError, setHeatmapError] = useState<string | null>(null);
+
+  // Prediction state
+  const [prediction, setPrediction] = useState<PredictResponse | null>(null);
+  const [isPredicting, setIsPredicting] = useState(false);
+  const [predictError, setPredictError] = useState<string | null>(null);
+
+  // Request a prediction for a clicked location
+  const predictAt = async (lng: number, lat: number) => {
+    // Drop / move a marker at the clicked point
+    if (!marker.current) {
+      marker.current = new mapboxgl.Marker({ color: '#f59e0b' });
+    }
+    marker.current.setLngLat([lng, lat]).addTo(map.current!);
+
+    setPrediction(null);
+    setPredictError(null);
+    setIsPredicting(true);
+
+    try {
+      const response = await fetch('/api/predictions/predict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ latitude: lat, longitude: lng }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || `Prediction failed: ${response.statusText}`);
+      }
+      setPrediction(data as PredictResponse);
+    } catch (error) {
+      console.error('Error predicting:', error);
+      setPredictError(error instanceof Error ? error.message : 'Prediction failed');
+    } finally {
+      setIsPredicting(false);
+    }
+  };
 
   // Fetch and display heatmap data
   const loadHeatmap = async () => {
@@ -208,6 +260,23 @@ export default function Map({ onPredictionLoad }: MapProps) {
       loadHeatmap();
     });
 
+    // Signal that the map is clickable for predictions
+    map.current.getCanvas().style.cursor = 'crosshair';
+
+    // Click anywhere in NYC to predict the most likely violation there
+    map.current.on('click', (e) => {
+      const { lng, lat } = e.lngLat;
+      if (
+        lat < NYC_BOUNDS.minLat || lat > NYC_BOUNDS.maxLat ||
+        lng < NYC_BOUNDS.minLon || lng > NYC_BOUNDS.maxLon
+      ) {
+        setPredictError('Click within New York City to get a prediction.');
+        setPrediction(null);
+        return;
+      }
+      predictAt(lng, lat);
+    });
+
     return () => {
       map.current?.remove();
       map.current = null;
@@ -269,6 +338,106 @@ export default function Map({ onPredictionLoad }: MapProps) {
               >
                 Retry
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Click-to-predict hint */}
+      {isLoaded && !prediction && !isPredicting && !predictError && (
+        <div className="absolute top-6 left-6 z-20 max-w-xs">
+          <div className="bg-slate-900/90 backdrop-blur-sm rounded-lg p-4 border border-amber-500/30 shadow-xl">
+            <h2 className="text-white text-sm font-semibold mb-1 flex items-center gap-2">
+              <span>🎯</span> Predict a violation
+            </h2>
+            <p className="text-slate-400 text-xs leading-relaxed">
+              Click anywhere in NYC and an XGBoost model predicts the most likely
+              parking violation for that spot, given the current day and time.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Prediction panel */}
+      {isLoaded && (isPredicting || prediction || predictError) && (
+        <div className="absolute top-6 left-6 z-30 w-80 max-w-[calc(100vw-3rem)]">
+          <div className="bg-slate-900/95 backdrop-blur-sm rounded-lg border border-slate-700/60 shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/60">
+              <h2 className="text-white text-sm font-semibold flex items-center gap-2">
+                <span>🎯</span> Violation Prediction
+              </h2>
+              <button
+                onClick={() => {
+                  setPrediction(null);
+                  setPredictError(null);
+                  marker.current?.remove();
+                }}
+                className="text-slate-400 hover:text-white text-lg leading-none"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="p-4">
+              {isPredicting && (
+                <div className="flex items-center gap-3 py-2">
+                  <div className="w-4 h-4 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
+                  <span className="text-slate-300 text-sm">
+                    Running model… <span className="text-slate-500">(first call may take a few seconds)</span>
+                  </span>
+                </div>
+              )}
+
+              {!isPredicting && predictError && (
+                <p className="text-red-300 text-sm">⚠️ {predictError}</p>
+              )}
+
+              {!isPredicting && prediction && (
+                <>
+                  <div className="mb-4">
+                    <p className="text-xs text-slate-500 uppercase tracking-wide mb-1">Most likely</p>
+                    <p className="text-white text-lg font-semibold leading-tight">
+                      {violationLabel(prediction.predicted_violation)}
+                    </p>
+                    <div className="flex items-center gap-2 mt-1 text-xs text-slate-400">
+                      <span>Code #{prediction.predicted_violation}</span>
+                      <span>·</span>
+                      <span>{(prediction.confidence * 100).toFixed(1)}% confidence</span>
+                      {VIOLATION_CODES[prediction.predicted_violation]?.fineOther != null && (
+                        <>
+                          <span>·</span>
+                          <span className="text-amber-400">
+                            ~${VIOLATION_CODES[prediction.predicted_violation]!.fineOther} fine
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-slate-500 uppercase tracking-wide mb-2">Top predictions</p>
+                  <ul className="space-y-2">
+                    {prediction.top_predictions.map((item) => (
+                      <li key={item.violation_code}>
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <span className="text-slate-300 truncate pr-2">
+                            {violationLabel(item.violation_code)}
+                          </span>
+                          <span className="text-slate-400 tabular-nums shrink-0">
+                            {(item.probability * 100).toFixed(1)}%
+                          </span>
+                        </div>
+                        <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-amber-500 to-red-500 rounded-full"
+                            style={{ width: `${Math.max(2, item.probability * 100)}%` }}
+                          />
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
             </div>
           </div>
         </div>
