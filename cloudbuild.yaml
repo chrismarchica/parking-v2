@@ -1,13 +1,23 @@
 steps:
+  # Build, tagging with the immutable commit SHA (and latest for convenience).
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
       - '--build-arg'
       - 'NEXT_PUBLIC_MAPBOX_TOKEN=${_NEXT_PUBLIC_MAPBOX_TOKEN}'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/parking-app'
+      - 'gcr.io/$PROJECT_ID/parking-app:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/parking-app:latest'
       - '.'
 
+  # Push BEFORE deploying so the registry actually has this build's image.
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/parking-app:$COMMIT_SHA']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/parking-app:latest']
+
+  # Deploy the exact image we just built by immutable SHA (never :latest).
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -15,15 +25,12 @@ steps:
       - 'deploy'
       - 'parking-v2'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/parking-app'
+      - 'gcr.io/$PROJECT_ID/parking-app:$COMMIT_SHA'
       - '--region'
       - 'us-east4'
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
-
-images:
-  - 'gcr.io/$PROJECT_ID/parking-app'
 
 options:
   logging: CLOUD_LOGGING_ONLY
