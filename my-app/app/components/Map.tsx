@@ -3,20 +3,15 @@
 import { useRef, useEffect, useState } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
-import { VIOLATION_CODES, violationLabel } from '@/lib/violation-codes';
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
 // NYC coordinates
 const NYC_CENTER: [number, number] = [-73.985, 40.748];
 const DEFAULT_ZOOM = 11;
+const NYC_BBOX = '-74.3,40.45,-73.65,40.95';
 
-// NYC bounding box (matches server-side validation in the predict route)
-const NYC_BOUNDS = { minLat: 40.4, maxLat: 41.0, minLon: -74.3, maxLon: -73.7 };
-
-interface MapProps {
-  onPredictionLoad?: (data: null) => void;
-}
+const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 interface HeatmapPoint {
   latitude: number;
@@ -29,217 +24,170 @@ interface HeatmapResponse {
   count: number;
 }
 
-interface PredictionItem {
-  violation_code: string;
-  probability: number;
+interface HourRisk {
+  hour: number;
+  risk: number;
 }
 
-interface PredictResponse {
-  predicted_violation: string;
-  confidence: number;
-  top_predictions: PredictionItem[];
+interface RiskResponse {
+  risk_score: number;
+  level: string;
+  factors: string[];
+  hourly: HourRisk[];
 }
 
-export default function Map({ onPredictionLoad }: MapProps) {
+interface RiskResult extends RiskResponse {
+  place: string;
+  lat: number;
+  lon: number;
+  dow: number;
+}
+
+// Build a local (no timezone) datetime string whose weekday === dow (Sun=0).
+function dateForDow(dow: number): string {
+  const now = new Date();
+  const delta = (dow - now.getDay() + 7) % 7;
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + delta, 12, 0, 0);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T12:00:00`;
+}
+
+function riskColor(risk: number): string {
+  // 0 -> green, 50 -> amber, 100 -> red
+  const hue = Math.round(120 - (risk / 100) * 120);
+  return `hsl(${hue}, 80%, 50%)`;
+}
+
+function formatHour(h: number): string {
+  const ampm = h < 12 ? 'am' : 'pm';
+  const hr = h % 12 === 0 ? 12 : h % 12;
+  return `${hr}${ampm}`;
+}
+
+export default function Map() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const marker = useRef<mapboxgl.Marker | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
-  const [isLoadingHeatmap, setIsLoadingHeatmap] = useState(false);
-  const [heatmapError, setHeatmapError] = useState<string | null>(null);
 
-  // Prediction state
-  const [prediction, setPrediction] = useState<PredictResponse | null>(null);
-  const [isPredicting, setIsPredicting] = useState(false);
-  const [predictError, setPredictError] = useState<string | null>(null);
+  // Address / risk state
+  const [address, setAddress] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<RiskResult | null>(null);
+  const [selectedDow, setSelectedDow] = useState<number>(new Date().getDay());
+  const [selectedHour, setSelectedHour] = useState<number>(new Date().getHours());
 
-  // Request a prediction for a clicked location
-  const predictAt = async (lng: number, lat: number) => {
-    // Drop / move a marker at the clicked point
-    if (!marker.current) {
-      marker.current = new mapboxgl.Marker({ color: '#f59e0b' });
-    }
-    marker.current.setLngLat([lng, lat]).addTo(map.current!);
+  // Fetch risk for a location + day of week; returns the API payload.
+  const fetchRisk = async (lat: number, lon: number, dow: number): Promise<RiskResponse> => {
+    const res = await fetch('/api/predictions/risk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ latitude: lat, longitude: lon, datetime: dateForDow(dow) }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error || 'Risk request failed');
+    return data as RiskResponse;
+  };
 
-    setPrediction(null);
-    setPredictError(null);
-    setIsPredicting(true);
-
+  const runSearch = async () => {
+    const query = address.trim();
+    if (!query) return;
+    setIsSearching(true);
+    setError(null);
     try {
-      const response = await fetch('/api/predictions/predict', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ latitude: lat, longitude: lng }),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data?.error || `Prediction failed: ${response.statusText}`);
+      // Geocode the address with Mapbox, biased to NYC.
+      const geoUrl =
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json` +
+        `?access_token=${MAPBOX_TOKEN}&bbox=${NYC_BBOX}&proximity=-73.98,40.75&limit=1&country=US`;
+      const geoRes = await fetch(geoUrl);
+      const geo = await geoRes.json();
+      if (!geo.features || geo.features.length === 0) {
+        throw new Error('Could not find that address in NYC. Try adding a borough.');
       }
-      setPrediction(data as PredictResponse);
-    } catch (error) {
-      console.error('Error predicting:', error);
-      setPredictError(error instanceof Error ? error.message : 'Prediction failed');
+      const [lon, lat] = geo.features[0].center as [number, number];
+      const place = geo.features[0].place_name as string;
+
+      const dow = new Date().getDay();
+      const risk = await fetchRisk(lat, lon, dow);
+
+      // Move map + marker to the location
+      map.current?.flyTo({ center: [lon, lat], zoom: 15, duration: 1200 });
+      if (!marker.current) marker.current = new mapboxgl.Marker({ color: '#f59e0b' });
+      marker.current.setLngLat([lon, lat]).addTo(map.current!);
+
+      setSelectedDow(dow);
+      setSelectedHour(new Date().getHours());
+      setResult({ ...risk, place, lat, lon, dow });
+    } catch (err) {
+      console.error(err);
+      setError(err instanceof Error ? err.message : 'Search failed');
+      setResult(null);
     } finally {
-      setIsPredicting(false);
+      setIsSearching(false);
     }
   };
 
-  // Fetch and display heatmap data
+  // Re-query when the user picks a different day of week
+  const selectDay = async (dow: number) => {
+    if (!result) return;
+    setSelectedDow(dow);
+    try {
+      const risk = await fetchRisk(result.lat, result.lon, dow);
+      setResult({ ...result, ...risk, dow });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Risk request failed');
+    }
+  };
+
+  // Load heatmap once the map is ready (background context layer)
   const loadHeatmap = async () => {
     if (!map.current) return;
-
-    setIsLoadingHeatmap(true);
-    setHeatmapError(null);
-
     try {
-      // Fetch heatmap data from the API
       const response = await fetch('/api/predictions/heatmap?limit=10000');
-      if (!response.ok) {
-        throw new Error(`Failed to fetch heatmap data: ${response.statusText}`);
-      }
-
+      if (!response.ok) return;
       const data: HeatmapResponse = await response.json();
-      
-      if (!data.points || data.points.length === 0) {
-        throw new Error('No heatmap data available');
-      }
+      if (!data.points?.length) return;
 
-      // Convert to GeoJSON format
       const geojson: GeoJSON.FeatureCollection<GeoJSON.Point> = {
         type: 'FeatureCollection',
-        features: data.points.map((point) => ({
+        features: data.points.map((p) => ({
           type: 'Feature',
-          properties: {
-            violation_code: point.violation_code,
-          },
-          geometry: {
-            type: 'Point',
-            coordinates: [point.longitude, point.latitude],
-          },
+          properties: {},
+          geometry: { type: 'Point', coordinates: [p.longitude, p.latitude] },
         })),
       };
 
-      // Remove existing layers and sources if they exist
-      if (map.current?.getLayer('heatmap-layer')) {
-        map.current.removeLayer('heatmap-layer');
-      }
-      if (map.current?.getLayer('heatmap-points')) {
-        map.current.removeLayer('heatmap-points');
-      }
-      if (map.current?.getSource('heatmap-data')) {
-        map.current.removeSource('heatmap-data');
-      }
-
-      // Add source
-      map.current?.addSource('heatmap-data', {
-        type: 'geojson',
-        data: geojson,
-      });
-
-      // Add heatmap layer
+      if (map.current?.getSource('heatmap-data')) return;
+      map.current?.addSource('heatmap-data', { type: 'geojson', data: geojson });
       map.current?.addLayer({
         id: 'heatmap-layer',
         type: 'heatmap',
         source: 'heatmap-data',
         maxzoom: 15,
         paint: {
-          // Increase weight as density increases
-          'heatmap-weight': [
-            'interpolate',
-            ['linear'],
-            ['zoom'],
-            0, 0.5,
-            15, 1
-          ],
-          // Increase intensity as zoom level increases
-          'heatmap-intensity': [
-            'interpolate',
-            ['linear'],
-            ['zoom'],
-            0, 0.5,
-            15, 1.5
-          ],
-          // Color ramp for heatmap (blue -> cyan -> lime -> yellow -> red)
+          'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 0, 0.5, 15, 1.5],
           'heatmap-color': [
-            'interpolate',
-            ['linear'],
-            ['heatmap-density'],
+            'interpolate', ['linear'], ['heatmap-density'],
             0, 'rgba(33,102,172,0)',
             0.2, 'rgb(103,169,207)',
             0.4, 'rgb(209,229,240)',
             0.6, 'rgb(253,219,199)',
             0.8, 'rgb(239,138,98)',
-            1, 'rgb(178,24,43)'
+            1, 'rgb(178,24,43)',
           ],
-          // Adjust radius by zoom level
-          'heatmap-radius': [
-            'interpolate',
-            ['linear'],
-            ['zoom'],
-            0, 2,
-            9, 10,
-            15, 20
-          ],
-          // Transition from heatmap to circle layer by zoom level
-          'heatmap-opacity': [
-            'interpolate',
-            ['linear'],
-            ['zoom'],
-            7, 0.8,
-            13, 0.6,
-            15, 0
-          ],
+          'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 0, 2, 9, 10, 15, 20],
+          'heatmap-opacity': ['interpolate', ['linear'], ['zoom'], 7, 0.7, 13, 0.4, 15, 0],
         },
       });
-
-      // Add circle layer for when zoomed in
-      map.current?.addLayer({
-        id: 'heatmap-points',
-        type: 'circle',
-        source: 'heatmap-data',
-        minzoom: 13,
-        paint: {
-          // Size circle radius by zoom level
-          'circle-radius': [
-            'interpolate',
-            ['linear'],
-            ['zoom'],
-            13, 2,
-            16, 6
-          ],
-          // Color circles by violation type (or use a single color)
-          'circle-color': '#ff6b6b',
-          'circle-stroke-color': '#fff',
-          'circle-stroke-width': 1,
-          'circle-opacity': [
-            'interpolate',
-            ['linear'],
-            ['zoom'],
-            13, 0,
-            15, 0.8
-          ]
-        }
-      });
-
-      console.log(`Loaded ${data.count} heatmap points`);
-      onPredictionLoad?.(null);
-    } catch (error) {
-      console.error('Error loading heatmap:', error);
-      setHeatmapError(error instanceof Error ? error.message : 'Failed to load heatmap');
-    } finally {
-      setIsLoadingHeatmap(false);
+    } catch (err) {
+      console.error('Error loading heatmap:', err);
     }
   };
 
   // Initialize map
   useEffect(() => {
-    if (!mapContainer.current || map.current) return;
-
-    if (!MAPBOX_TOKEN) {
-      console.error('Mapbox token not found');
-      return;
-    }
-
+    if (!mapContainer.current || map.current || !MAPBOX_TOKEN) return;
     mapboxgl.accessToken = MAPBOX_TOKEN;
 
     map.current = new mapboxgl.Map({
@@ -248,40 +196,17 @@ export default function Map({ onPredictionLoad }: MapProps) {
       center: NYC_CENTER,
       zoom: DEFAULT_ZOOM,
     });
-
-    map.current.addControl(
-      new mapboxgl.NavigationControl({ visualizePitch: true }),
-      'top-right'
-    );
-
+    map.current.addControl(new mapboxgl.NavigationControl(), 'top-right');
     map.current.on('load', () => {
       setIsLoaded(true);
-      // Load heatmap data once map is ready
       loadHeatmap();
-    });
-
-    // Signal that the map is clickable for predictions
-    map.current.getCanvas().style.cursor = 'crosshair';
-
-    // Click anywhere in NYC to predict the most likely violation there
-    map.current.on('click', (e) => {
-      const { lng, lat } = e.lngLat;
-      if (
-        lat < NYC_BOUNDS.minLat || lat > NYC_BOUNDS.maxLat ||
-        lng < NYC_BOUNDS.minLon || lng > NYC_BOUNDS.maxLon
-      ) {
-        setPredictError('Click within New York City to get a prediction.');
-        setPrediction(null);
-        return;
-      }
-      predictAt(lng, lat);
     });
 
     return () => {
       map.current?.remove();
       map.current = null;
     };
-  }, [onPredictionLoad]);
+  }, []);
 
   if (!MAPBOX_TOKEN) {
     return (
@@ -289,9 +214,6 @@ export default function Map({ onPredictionLoad }: MapProps) {
         <div className="text-center p-8 max-w-md">
           <div className="text-6xl mb-4">🗺️</div>
           <h2 className="text-xl font-semibold text-white mb-2">Mapbox Token Required</h2>
-          <p className="text-slate-400 text-sm">
-            Create a <code className="bg-slate-800 px-2 py-1 rounded">.env.local</code> file with:
-          </p>
           <code className="block mt-3 bg-slate-800 p-3 rounded text-amber-400 text-sm">
             NEXT_PUBLIC_MAPBOX_TOKEN=your_token_here
           </code>
@@ -300,11 +222,13 @@ export default function Map({ onPredictionLoad }: MapProps) {
     );
   }
 
+  const shownRisk = result ? (result.hourly[selectedHour]?.risk ?? result.risk_score) : 0;
+  const peak = result ? [...result.hourly].sort((a, b) => b.risk - a.risk)[0] : null;
+
   return (
     <>
       <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
-      
-      {/* Map loading indicator */}
+
       {!isLoaded && (
         <div className="absolute inset-0 flex items-center justify-center bg-slate-900 z-50">
           <div className="flex flex-col items-center gap-3">
@@ -314,150 +238,139 @@ export default function Map({ onPredictionLoad }: MapProps) {
         </div>
       )}
 
-      {/* Heatmap loading indicator */}
-      {isLoaded && isLoadingHeatmap && (
-        <div className="absolute top-20 left-1/2 transform -translate-x-1/2 z-20">
-          <div className="bg-slate-900/90 backdrop-blur-sm rounded-lg px-4 py-3 border border-slate-700/50 shadow-xl">
-            <div className="flex items-center gap-3">
-              <div className="w-4 h-4 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
-              <span className="text-slate-300 text-sm">Loading heatmap data...</span>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Heatmap error indicator */}
-      {isLoaded && heatmapError && (
-        <div className="absolute top-20 left-1/2 transform -translate-x-1/2 z-20">
-          <div className="bg-red-900/90 backdrop-blur-sm rounded-lg px-4 py-3 border border-red-700/50 shadow-xl">
-            <div className="flex items-center gap-3">
-              <span className="text-red-200 text-sm">⚠️ {heatmapError}</span>
-              <button
-                onClick={loadHeatmap}
-                className="ml-2 text-xs bg-red-800 hover:bg-red-700 px-2 py-1 rounded transition-colors"
-              >
-                Retry
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Click-to-predict hint */}
-      {isLoaded && !prediction && !isPredicting && !predictError && (
-        <div className="absolute top-6 left-6 z-20 max-w-xs">
-          <div className="bg-slate-900/90 backdrop-blur-sm rounded-lg p-4 border border-amber-500/30 shadow-xl">
-            <h2 className="text-white text-sm font-semibold mb-1 flex items-center gap-2">
-              <span>🎯</span> Predict a violation
-            </h2>
-            <p className="text-slate-400 text-xs leading-relaxed">
-              Click anywhere in NYC and an XGBoost model predicts the most likely
-              parking violation for that spot, given the current day and time.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Prediction panel */}
-      {isLoaded && (isPredicting || prediction || predictError) && (
-        <div className="absolute top-6 left-6 z-30 w-80 max-w-[calc(100vw-3rem)]">
-          <div className="bg-slate-900/95 backdrop-blur-sm rounded-lg border border-slate-700/60 shadow-2xl overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/60">
-              <h2 className="text-white text-sm font-semibold flex items-center gap-2">
-                <span>🎯</span> Violation Prediction
-              </h2>
-              <button
-                onClick={() => {
-                  setPrediction(null);
-                  setPredictError(null);
-                  marker.current?.remove();
-                }}
-                className="text-slate-400 hover:text-white text-lg leading-none"
-                aria-label="Close"
-              >
-                ×
-              </button>
+      {/* Control panel */}
+      {isLoaded && (
+        <div className="absolute top-4 left-4 z-30 w-[22rem] max-w-[calc(100vw-2rem)]">
+          <div className="bg-slate-900/95 backdrop-blur-sm rounded-xl border border-slate-700/60 shadow-2xl overflow-hidden">
+            {/* Header + search */}
+            <div className="p-4 border-b border-slate-700/60">
+              <h1 className="text-white text-base font-semibold flex items-center gap-2 mb-1">
+                <span>🅿️</span> NYC Parking Ticket Risk
+              </h1>
+              <p className="text-slate-400 text-xs mb-3">
+                Enter where you want to park — an XGBoost model scores how likely a ticket is,
+                by location and time.
+              </p>
+              <div className="flex gap-2">
+                <input
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && runSearch()}
+                  placeholder="e.g. 350 5th Ave, Manhattan"
+                  className="flex-1 bg-slate-800 text-white text-sm rounded-lg px-3 py-2 border border-slate-700 focus:border-amber-500 focus:outline-none placeholder:text-slate-500"
+                />
+                <button
+                  onClick={runSearch}
+                  disabled={isSearching}
+                  className="bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-900 text-sm font-semibold rounded-lg px-4 py-2 transition-colors"
+                >
+                  {isSearching ? '…' : 'Check'}
+                </button>
+              </div>
+              {error && <p className="text-red-300 text-xs mt-2">⚠️ {error}</p>}
             </div>
 
-            <div className="p-4">
-              {isPredicting && (
-                <div className="flex items-center gap-3 py-2">
-                  <div className="w-4 h-4 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
-                  <span className="text-slate-300 text-sm">
-                    Running model… <span className="text-slate-500">(first call may take a few seconds)</span>
+            {/* Result */}
+            {result && (
+              <div className="p-4">
+                <p className="text-slate-400 text-xs mb-3 truncate" title={result.place}>
+                  📍 {result.place}
+                </p>
+
+                {/* Score */}
+                <div className="flex items-end gap-3 mb-1">
+                  <span
+                    className="text-5xl font-bold tabular-nums leading-none"
+                    style={{ color: riskColor(shownRisk) }}
+                  >
+                    {Math.round(shownRisk)}
                   </span>
-                </div>
-              )}
-
-              {!isPredicting && predictError && (
-                <p className="text-red-300 text-sm">⚠️ {predictError}</p>
-              )}
-
-              {!isPredicting && prediction && (
-                <>
-                  <div className="mb-4">
-                    <p className="text-xs text-slate-500 uppercase tracking-wide mb-1">Most likely</p>
-                    <p className="text-white text-lg font-semibold leading-tight">
-                      {violationLabel(prediction.predicted_violation)}
-                    </p>
-                    <div className="flex items-center gap-2 mt-1 text-xs text-slate-400">
-                      <span>Code #{prediction.predicted_violation}</span>
-                      <span>·</span>
-                      <span>{(prediction.confidence * 100).toFixed(1)}% confidence</span>
-                      {VIOLATION_CODES[prediction.predicted_violation]?.fineOther != null && (
-                        <>
-                          <span>·</span>
-                          <span className="text-amber-400">
-                            ~${VIOLATION_CODES[prediction.predicted_violation]!.fineOther} fine
-                          </span>
-                        </>
-                      )}
+                  <div className="pb-1">
+                    <div className="text-white text-sm font-semibold">
+                      {shownRisk >= 75 ? 'Very High' : shownRisk >= 50 ? 'High' : shownRisk >= 25 ? 'Moderate' : 'Low'} risk
+                    </div>
+                    <div className="text-slate-500 text-xs">
+                      {DAY_LABELS[selectedDow]} · {formatHour(selectedHour)}
                     </div>
                   </div>
+                </div>
+                {peak && (
+                  <p className="text-slate-400 text-xs mb-3">
+                    Riskiest around <span className="text-slate-200">{formatHour(peak.hour)}</span> ({Math.round(peak.risk)})
+                  </p>
+                )}
 
-                  <p className="text-xs text-slate-500 uppercase tracking-wide mb-2">Top predictions</p>
-                  <ul className="space-y-2">
-                    {prediction.top_predictions.map((item) => (
-                      <li key={item.violation_code}>
-                        <div className="flex items-center justify-between text-xs mb-1">
-                          <span className="text-slate-300 truncate pr-2">
-                            {violationLabel(item.violation_code)}
-                          </span>
-                          <span className="text-slate-400 tabular-nums shrink-0">
-                            {(item.probability * 100).toFixed(1)}%
-                          </span>
-                        </div>
-                        <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-gradient-to-r from-amber-500 to-red-500 rounded-full"
-                            style={{ width: `${Math.max(2, item.probability * 100)}%` }}
-                          />
-                        </div>
+                {/* Day selector */}
+                <div className="flex gap-1 mb-3">
+                  {DAY_LABELS.map((d, i) => (
+                    <button
+                      key={d}
+                      onClick={() => selectDay(i)}
+                      className={`flex-1 text-xs py-1 rounded transition-colors ${
+                        i === selectedDow
+                          ? 'bg-amber-500 text-slate-900 font-semibold'
+                          : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                      }`}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                </div>
+
+                {/* 24-hour risk chart */}
+                <p className="text-slate-500 text-[10px] uppercase tracking-wide mb-1">Risk by hour</p>
+                <div className="flex items-end gap-[2px] h-16 mb-1">
+                  {result.hourly.map((h) => (
+                    <button
+                      key={h.hour}
+                      onClick={() => setSelectedHour(h.hour)}
+                      title={`${formatHour(h.hour)}: ${Math.round(h.risk)}`}
+                      className="flex-1 rounded-sm transition-opacity hover:opacity-80"
+                      style={{
+                        height: `${Math.max(4, h.risk)}%`,
+                        backgroundColor: riskColor(h.risk),
+                        outline: h.hour === selectedHour ? '2px solid white' : 'none',
+                      }}
+                    />
+                  ))}
+                </div>
+                <div className="flex justify-between text-[9px] text-slate-600">
+                  <span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span>
+                </div>
+
+                {/* Factors */}
+                {result.factors.length > 0 && (
+                  <ul className="mt-3 space-y-1">
+                    {result.factors.map((f) => (
+                      <li key={f} className="text-slate-300 text-xs flex gap-2">
+                        <span className="text-amber-400">•</span> {f}
                       </li>
                     ))}
                   </ul>
-                </>
-              )}
-            </div>
+                )}
+
+                <p className="text-slate-600 text-[10px] mt-3 leading-snug">
+                  Relative risk index (0–100) from historical ticket patterns — not a
+                  guaranteed probability.
+                </p>
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* Legend */}
-      {isLoaded && !isLoadingHeatmap && !heatmapError && (
+      {/* Heatmap legend */}
+      {isLoaded && (
         <div className="absolute bottom-6 right-6 z-10">
-          <div className="bg-slate-900/90 backdrop-blur-sm rounded-lg p-4 border border-slate-700/50 shadow-xl">
-            <h3 className="text-white text-sm font-semibold mb-3">Ticket Density</h3>
+          <div className="bg-slate-900/90 backdrop-blur-sm rounded-lg p-3 border border-slate-700/50 shadow-xl">
+            <h3 className="text-white text-xs font-semibold mb-2">Historical ticket density</h3>
             <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-400">Low</span>
-              <div className="w-32 h-3 rounded" style={{
-                background: 'linear-gradient(to right, rgb(103,169,207), rgb(209,229,240), rgb(253,219,199), rgb(239,138,98), rgb(178,24,43))'
+              <span className="text-[10px] text-slate-400">Low</span>
+              <div className="w-24 h-2 rounded" style={{
+                background: 'linear-gradient(to right, rgb(103,169,207), rgb(253,219,199), rgb(178,24,43))'
               }} />
-              <span className="text-xs text-slate-400">High</span>
+              <span className="text-[10px] text-slate-400">High</span>
             </div>
-            <p className="text-xs text-slate-500 mt-2">
-              Zoom in to see individual tickets
-            </p>
           </div>
         </div>
       )}
